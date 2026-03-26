@@ -1,6 +1,6 @@
 module github.com/fourjs-mikefolcher/fglpkg
 
-go 1.22
+go 1.20
 
 require (
 	// AWS SDK v2 — used only by the registry server for Cloudflare R2 uploads.
