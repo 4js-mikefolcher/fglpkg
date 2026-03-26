@@ -2,14 +2,16 @@
 //
 // Resolution algorithm:
 //  1. Detect the installed Genero BDL version (or accept an override).
-//  2. Start with the root manifest's direct dependencies as the work queue.
-//  3. For each package, fetch its available versions from the registry.
-//     Filter to those whose generoConstraint is satisfied by the detected
+//  2. If a Workspace is provided, local member dependencies are satisfied
+//     from disk — they are never sent to the registry or written to the lock.
+//  3. Start with the root manifest's direct dependencies as the work queue.
+//  4. For each package, fetch its available versions from the registry.
+//     Filter to those whose GeneroConstraint is satisfied by the detected
 //     Genero version, then apply the semver package constraint.
-//  4. If the package has already been seen, intersect the new constraint with
+//  5. If the package has already been seen, intersect the new constraint with
 //     accumulated constraints — if no version satisfies all, report a conflict.
-//  5. Recurse into each resolved package's own dependencies (BFS).
-//  6. Return a flat, ordered install plan with no duplicates.
+//  6. Recurse into each resolved package's own dependencies (BFS).
+//  7. Return a flat, ordered install plan with no duplicates.
 //
 // Java JAR dependencies are collected separately and deduplicated; when the
 // same JAR appears at different versions the higher version wins.
@@ -17,12 +19,14 @@ package resolver
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
+	"github.com/4js-mikefolcher/fglpkg/internal/workspace"
 )
 
 // ResolvedPackage is a single BDL package in the final install plan.
@@ -35,11 +39,19 @@ type ResolvedPackage struct {
 	RequiredBy []string
 }
 
+// LocalMember describes a workspace member satisfying a local dependency.
+type LocalMember struct {
+	Name    string
+	Version string
+	Path    string
+}
+
 // Plan is the complete, ordered install plan produced by resolution.
 type Plan struct {
-	Packages     []ResolvedPackage
-	JARs         []manifest.JavaDependency
-	GeneroVersion genero.Version // the runtime version used during resolution
+	Packages      []ResolvedPackage
+	JARs          []manifest.JavaDependency
+	LocalMembers  []LocalMember
+	GeneroVersion genero.Version
 }
 
 // Conflict describes a version conflict between two or more requirers.
@@ -95,7 +107,6 @@ func New() (*Resolver, error) {
 		fetchInfo:     registryInfo,
 		generoVersion: gv,
 	}
-	// Auto-detect workspace — nil if not in one.
 	if wsRoot := workspace.FindRoot("."); wsRoot != "" {
 		ws, err := workspace.Load(wsRoot)
 		if err != nil {
@@ -133,7 +144,6 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 	state := newState()
 
 	for name, constraint := range root.Dependencies.FGL {
-		// If this dep is a local workspace member, record it and skip registry.
 		if r.ws != nil && r.ws.IsLocal(name) {
 			member := r.ws.Member(name)
 			state.addLocalMember(LocalMember{
@@ -141,7 +151,6 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 				Version: member.Manifest.Version,
 				Path:    member.Path,
 			})
-			// Still enqueue its transitive deps for resolution.
 			for depName, depConstraint := range member.Manifest.Dependencies.FGL {
 				if r.ws.IsLocal(depName) {
 					localDep := r.ws.Member(depName)
@@ -168,7 +177,6 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 	for state.hasWork() {
 		item := state.dequeue()
 
-		// Skip local workspace members encountered transitively.
 		if r.ws != nil && r.ws.IsLocal(item.name) {
 			member := r.ws.Member(item.name)
 			state.addLocalMember(LocalMember{
@@ -255,7 +263,7 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 	return plan, nil
 }
 
-// filterByGenero removes candidate versions whose generoConstraint is not
+// filterByGenero removes candidate versions whose GeneroConstraint is not
 // satisfied by the detected Genero runtime version.
 func (r *Resolver) filterByGenero(pkgName string, candidates []CandidateVersion) ([]semver.Version, error) {
 	out := make([]semver.Version, 0, len(candidates))
@@ -309,7 +317,7 @@ type state struct {
 	constraints  map[string][]constraintSource
 	resolved     map[string]*resolvedEntry
 	jars         map[string]manifest.JavaDependency
-	localMembers map[string]LocalMember // name → local workspace member
+	localMembers map[string]LocalMember
 	conflicts    []Conflict
 	orderSeq     int
 }
@@ -323,12 +331,11 @@ func newState() *state {
 	}
 }
 
+func (s *state) enqueue(item workItem)        { s.queue = append(s.queue, item) }
+func (s *state) dequeue() workItem            { item := s.queue[0]; s.queue = s.queue[1:]; return item }
+func (s *state) hasWork() bool                { return len(s.queue) > 0 }
+func (s *state) isResolved(n string) bool     { _, ok := s.resolved[n]; return ok }
 func (s *state) addLocalMember(lm LocalMember) { s.localMembers[lm.Name] = lm }
-
-func (s *state) enqueue(item workItem)  { s.queue = append(s.queue, item) }
-func (s *state) dequeue() workItem      { item := s.queue[0]; s.queue = s.queue[1:]; return item }
-func (s *state) hasWork() bool          { return len(s.queue) > 0 }
-func (s *state) isResolved(n string) bool { _, ok := s.resolved[n]; return ok }
 
 func (s *state) addConstraint(name, constraint, requiredBy string) error {
 	s.constraints[name] = append(s.constraints[name], constraintSource{
@@ -442,20 +449,20 @@ func (s *state) buildPlan() *Plan {
 
 // ─── Live registry fetchers ───────────────────────────────────────────────────
 
-func registryVersions(name string) ([]candidateVersion, error) {
+func registryVersions(name string) ([]CandidateVersion, error) {
 	vl, err := registry.FetchVersionList(name)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]candidateVersion, 0, len(vl.Versions))
+	out := make([]CandidateVersion, 0, len(vl.VersionEntries))
 	for _, ve := range vl.VersionEntries {
 		v, err := semver.Parse(ve.Version)
 		if err != nil {
 			continue
 		}
-		out = append(out, candidateVersion{
-			version:          v,
-			generoConstraint: ve.GeneroConstraint,
+		out = append(out, CandidateVersion{
+			Version:          v,
+			GeneroConstraint: ve.GeneroConstraint,
 		})
 	}
 	return out, nil
@@ -464,6 +471,3 @@ func registryVersions(name string) ([]candidateVersion, error) {
 func registryInfo(name, version string) (*registry.PackageInfo, error) {
 	return registry.FetchInfo(name, version)
 }
-
-// errWriter returns stderr; extracted so tests can redirect if needed.
-func errWriter() *os.File { return os.Stderr }

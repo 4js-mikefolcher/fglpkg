@@ -102,7 +102,7 @@ func Parse(s string) (Version, error) {
 	}, nil
 }
 
-// MustParse parses a version and panics on error. Useful in tests and constants.
+// MustParse parses a version string and panics on error.
 func MustParse(s string) Version {
 	v, err := Parse(s)
 	if err != nil {
@@ -186,15 +186,6 @@ func ParseConstraint(s string) (Constraint, error) {
 	}
 
 	return Constraint{raw: raw, groups: groups}, nil
-}
-
-// MustParseConstraint parses a constraint and panics on error.
-func MustParseConstraint(s string) Constraint {
-	c, err := ParseConstraint(s)
-	if err != nil {
-		panic(err)
-	}
-	return c
 }
 
 // String returns the original constraint string.

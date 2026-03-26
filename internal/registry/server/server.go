@@ -362,9 +362,9 @@ func (h *handler) handlePackageInfo(w http.ResponseWriter, r *http.Request, name
 		writeError(w, http.StatusNotFound, fmt.Sprintf("version %s not found", version))
 		return
 	}
-	if ver.DownloadURL == "" {
-		ver.DownloadURL = h.downloadURL(name, version)
-	}
+        if ver.DownloadURL == "" {
+                ver.DownloadURL = h.store.downloadURL(name, version)
+        }
 	writeJSON(w, http.StatusOK, ver)
 }
 
@@ -486,7 +486,7 @@ func (h *handler) handlePublish(w http.ResponseWriter, r *http.Request, name, ve
 	}
 	defer zipFile.Close()
 
-	checksum, err := h.store.savePackage(name, version, meta, zipFile)
+        checksum, downloadURL, err := h.store.savePackage(name, version, meta, zipFile)
 	if err != nil {
 		log.Printf("publish error for %s@%s: %v", name, version, err)
 		writeError(w, http.StatusInternalServerError, "failed to save package")
@@ -509,7 +509,7 @@ func (h *handler) handlePublish(w http.ResponseWriter, r *http.Request, name, ve
 		"name":        name,
 		"version":     version,
 		"checksum":    checksum,
-		"downloadUrl": h.downloadURL(name, version),
+                "downloadUrl": downloadURL,
 	})
 	log.Printf("published %s@%s by %s (checksum: %s)", name, version, ar.Username, checksum)
 }

@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+        "net/http/httptest"
 	"strings"
 	"testing"
+
+        "github.com/4js-mikefolcher/fglpkg/internal/registry/server"
 )
 
 // ─── Auth test helpers ────────────────────────────────────────────────────────
@@ -449,12 +452,18 @@ func listOwners(t *testing.T, ts interface{ URL string }, pkg, token string) []s
 	return result["owners"]
 }
 
-// newTestServerWithReadAuth creates a test server with RequireReadAuth=true.
-func newTestServerWithReadAuth(t *testing.T) interface {
-	URL    string
-	Close()
-} {
+func newTestServerWithReadAuth(t *testing.T) *httptest.Server {
 	t.Helper()
-	// Imported from server_test.go helper infrastructure.
-	return newTestServerWithConfig(t, testToken, true)
+	cfg := server.Config{
+		DataDir:         t.TempDir(),
+		PublishToken:    testToken,
+		RequireReadAuth: true,
+	}
+	srv, err := server.NewTestServer(cfg)
+	if err != nil {
+		t.Fatalf("newTestServerWithReadAuth: %v", err)
+	}
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return ts
 }

@@ -22,7 +22,7 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/workspace"
 )
 
-// Execute is the main CLI entry point. It dispatches subcommands.
+// Execute is the main CLI entry point.
 func Execute() error {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -39,12 +39,16 @@ func Execute() error {
 		return cmdInstall(args)
 	case "remove":
 		return cmdRemove(args)
+	case "update":
+		return cmdUpdate(args)
 	case "list":
 		return cmdList(args)
 	case "env":
 		return cmdEnv(args)
 	case "search":
 		return cmdSearch(args)
+	case "publish":
+		return cmdPublish(args)
 	case "login":
 		return cmdLogin(args)
 	case "logout":
@@ -55,8 +59,9 @@ func Execute() error {
 		return cmdOwner(args)
 	case "token":
 		return cmdToken(args)
-
+	case "workspace", "ws":
 		return cmdWorkspace(args)
+	case "version":
 		fmt.Println("fglpkg version 0.1.0")
 		return nil
 	case "help", "--help", "-h":
@@ -67,40 +72,35 @@ func Execute() error {
 	}
 }
 
-// cmdInit creates a new fglpkg.json in the current directory.
+// ─── init ─────────────────────────────────────────────────────────────────────
+
 func cmdInit(_ []string) error {
 	if _, err := os.Stat(manifest.Filename); err == nil {
 		return fmt.Errorf("%s already exists in the current directory", manifest.Filename)
 	}
-
-	// Prompt for basic info
-	name := promptWithDefault("Package name", filepath_base())
+	name := promptWithDefault("Package name", filepathBase())
 	version := promptWithDefault("Version", "0.1.0")
 	description := promptWithDefault("Description", "")
 	author := promptWithDefault("Author", "")
-
 	m := manifest.New(name, version, description, author)
 	if err := m.Save("."); err != nil {
 		return fmt.Errorf("failed to write %s: %w", manifest.Filename, err)
 	}
-
 	fmt.Printf("✓ Created %s\n", manifest.Filename)
 	return nil
 }
 
-// cmdInstall installs packages. With no args, installs all deps from fglpkg.json.
-// With args, adds and installs the specified packages.
+// ─── install ──────────────────────────────────────────────────────────────────
+
 func cmdInstall(args []string) error {
 	home, err := fglpkgHome()
 	if err != nil {
 		return err
 	}
-
 	inst := installer.New(home)
 	projectDir, _ := os.Getwd()
 
 	if len(args) == 0 {
-		// Install all dependencies, honouring the lock file if present.
 		m, err := manifest.Load(".")
 		if err != nil {
 			return fmt.Errorf("failed to load %s: %w\nRun 'fglpkg init' first", manifest.Filename, err)
@@ -108,56 +108,140 @@ func cmdInstall(args []string) error {
 		return inst.InstallAll(m, projectDir, false)
 	}
 
-	// Install specific packages, add to fglpkg.json, then re-lock.
 	m, err := manifest.LoadOrNew(".")
 	if err != nil {
 		return err
 	}
-
 	for _, pkg := range args {
 		name, version, err := parsePackageArg(pkg)
 		if err != nil {
 			return err
 		}
-
 		fmt.Printf("Resolving %s@%s...\n", name, version)
 		info, err := registry.Resolve(name, version)
 		if err != nil {
 			return fmt.Errorf("failed to resolve %s@%s: %w", name, version, err)
 		}
-
 		m.AddFGLDependency(info.Name, info.Version)
 		fmt.Printf("✓ Added %s@%s to %s\n", info.Name, info.Version, manifest.Filename)
 	}
-
 	if err := m.Save("."); err != nil {
 		return err
 	}
-
-	// Re-resolve and re-lock with the updated manifest.
 	fmt.Println()
 	return inst.InstallAll(m, projectDir, true)
 }
 
-// cmdUpdate re-resolves all deps ignoring the lock file and writes a fresh lock.
+// ─── remove ───────────────────────────────────────────────────────────────────
+
+func cmdRemove(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: fglpkg remove <package>")
+	}
+	home, err := fglpkgHome()
+	if err != nil {
+		return err
+	}
+	m, err := manifest.Load(".")
+	if err != nil {
+		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
+	}
+	inst := installer.New(home)
+	for _, pkg := range args {
+		if err := inst.Remove(pkg); err != nil {
+			return fmt.Errorf("failed to remove %s: %w", pkg, err)
+		}
+		m.RemoveFGLDependency(pkg)
+		fmt.Printf("✓ Removed %s\n", pkg)
+	}
+	return m.Save(".")
+}
+
+// ─── update ───────────────────────────────────────────────────────────────────
+
 func cmdUpdate(_ []string) error {
 	home, err := fglpkgHome()
 	if err != nil {
 		return err
 	}
-
 	m, err := manifest.Load(".")
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
 	}
-
 	projectDir, _ := os.Getwd()
 	fmt.Println("Ignoring lock file and re-resolving all dependencies...")
 	return installer.New(home).InstallAll(m, projectDir, true)
 }
 
-// cmdPublish packages the current directory and publishes it to the registry.
+// ─── list ─────────────────────────────────────────────────────────────────────
+
+func cmdList(_ []string) error {
+	home, err := fglpkgHome()
+	if err != nil {
+		return err
+	}
+	pkgs, err := installer.New(home).List()
+	if err != nil {
+		return err
+	}
+	if len(pkgs) == 0 {
+		fmt.Println("No packages installed.")
+		return nil
+	}
+	fmt.Println("Installed packages:")
+	for _, p := range pkgs {
+		fmt.Printf("  %-30s %s\n", p.Name, p.Version)
+	}
+	return nil
+}
+
+// ─── env ──────────────────────────────────────────────────────────────────────
+
+func cmdEnv(_ []string) error {
+	home, err := fglpkgHome()
+	if err != nil {
+		return err
+	}
+	exports, err := env.New(home).Generate()
+	if err != nil {
+		return err
+	}
+	for _, line := range exports {
+		fmt.Println(line)
+	}
+	return nil
+}
+
+// ─── search ───────────────────────────────────────────────────────────────────
+
+func cmdSearch(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: fglpkg search <term>")
+	}
+	results, err := registry.Search(args[0])
+	if err != nil {
+		return fmt.Errorf("search failed: %w", err)
+	}
+	if len(results) == 0 {
+		fmt.Printf("No packages found matching %q\n", args[0])
+		return nil
+	}
+	fmt.Printf("Results for %q:\n", args[0])
+	fmt.Printf("  %-30s %-12s %s\n", "NAME", "VERSION", "DESCRIPTION")
+	fmt.Printf("  %-30s %-12s %s\n", "----", "-------", "-----------")
+	for _, r := range results {
+		fmt.Printf("  %-30s %-12s %s\n", r.Name, r.LatestVersion, r.Description)
+	}
+	return nil
+}
+
+// ─── publish ──────────────────────────────────────────────────────────────────
+
 func cmdPublish(_ []string) error {
+	home, err := fglpkgHome()
+	if err != nil {
+		return err
+	}
 	m, err := manifest.Load(".")
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
@@ -165,37 +249,26 @@ func cmdPublish(_ []string) error {
 	if err := m.Validate(); err != nil {
 		return fmt.Errorf("manifest is invalid: %w", err)
 	}
-
+	registryURL := defaultRegistry()
 	token := credentials.TokenFor(home, registryURL)
 	if token == "" {
 		return fmt.Errorf("not logged in to %s\nRun 'fglpkg login' or set FGLPKG_PUBLISH_TOKEN", registryURL)
 	}
-
-	registryURL := os.Getenv("FGLPKG_REGISTRY")
-	if registryURL == "" {
-		registryURL = "https://registry.fglpkg.dev"
-	}
-
 	fmt.Printf("Publishing %s@%s to %s...\n", m.Name, m.Version, registryURL)
-
 	if err := publishPackage(m, token, registryURL); err != nil {
 		return fmt.Errorf("publish failed: %w", err)
 	}
-
 	fmt.Printf("✓ Published %s@%s\n", m.Name, m.Version)
 	return nil
 }
 
-// publishPackage builds and uploads the package zip.
 func publishPackage(m *manifest.Manifest, token, registryURL string) error {
-	// Build zip of the current directory's compiled files.
 	zipData, checksum, err := buildPackageZip(m)
 	if err != nil {
 		return fmt.Errorf("cannot build package zip: %w", err)
 	}
 	fmt.Printf("  Package zip: %d bytes (SHA256: %s)\n", len(zipData), checksum)
 
-	// Build metadata JSON.
 	meta := map[string]any{
 		"description": m.Description,
 		"author":      m.Author,
@@ -212,7 +285,6 @@ func publishPackage(m *manifest.Manifest, token, registryURL string) error {
 		return err
 	}
 
-	// Build multipart body.
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	mw.WriteField("meta", string(metaJSON)) //nolint:errcheck
@@ -223,7 +295,6 @@ func publishPackage(m *manifest.Manifest, token, registryURL string) error {
 	fw.Write(zipData) //nolint:errcheck
 	mw.Close()
 
-	// POST to registry.
 	url := fmt.Sprintf("%s/packages/%s/%s/publish",
 		strings.TrimRight(registryURL, "/"), m.Name, m.Version)
 	req, err := http.NewRequest(http.MethodPost, url, &body)
@@ -238,7 +309,6 @@ func publishPackage(m *manifest.Manifest, token, registryURL string) error {
 		return fmt.Errorf("registry request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("registry returned %d: %s", resp.StatusCode, string(respBody))
@@ -246,16 +316,11 @@ func publishPackage(m *manifest.Manifest, token, registryURL string) error {
 	return nil
 }
 
-// buildPackageZip creates a zip of *.42m (and *.42f, *.sch) files in the
-// current directory, plus fglpkg.json. Returns the zip bytes and its
-// SHA256 checksum.
 func buildPackageZip(m *manifest.Manifest) ([]byte, string, error) {
 	var buf bytes.Buffer
 	h := sha256.New()
 	zw := zip.NewWriter(io.MultiWriter(&buf, h))
-
-	patterns := []string{"*.42m", "*.42f", "*.sch", manifest.Filename}
-	for _, pattern := range patterns {
+	for _, pattern := range []string{"*.42m", "*.42f", "*.sch", manifest.Filename} {
 		matches, _ := filepath.Glob(pattern)
 		for _, match := range matches {
 			if err := addFileToZip(zw, match); err != nil {
@@ -263,7 +328,6 @@ func buildPackageZip(m *manifest.Manifest) ([]byte, string, error) {
 			}
 		}
 	}
-
 	if err := zw.Close(); err != nil {
 		return nil, "", err
 	}
@@ -276,7 +340,6 @@ func addFileToZip(zw *zip.Writer, path string) error {
 		return err
 	}
 	defer f.Close()
-
 	fw, err := zw.Create(filepath.Base(path))
 	if err != nil {
 		return err
@@ -285,50 +348,282 @@ func addFileToZip(zw *zip.Writer, path string) error {
 	return err
 }
 
+// ─── login ────────────────────────────────────────────────────────────────────
+
+func cmdLogin(_ []string) error {
+	home, err := fglpkgHome()
+	if err != nil {
+		return err
+	}
+	registryURL := promptWithDefault("Registry URL", defaultRegistry())
+	token := promptWithDefault("Token", "")
+	if token == "" {
+		return fmt.Errorf("token cannot be empty")
+	}
+	username, err := whoamiRequest(registryURL, token)
+	if err != nil {
+		return fmt.Errorf("login failed: %w", err)
+	}
+	creds, err := credentials.Load(home)
+	if err != nil {
+		return err
+	}
+	creds.Set(registryURL, token, username)
+	if err := creds.Save(home); err != nil {
+		return err
+	}
+	fmt.Printf("✓ Logged in to %s as %s\n", registryURL, username)
+	return nil
+}
+
+// ─── logout ───────────────────────────────────────────────────────────────────
+
+func cmdLogout(_ []string) error {
+	home, err := fglpkgHome()
+	if err != nil {
+		return err
+	}
+	registryURL := promptWithDefault("Registry URL", defaultRegistry())
+	creds, err := credentials.Load(home)
+	if err != nil {
+		return err
+	}
+	if _, ok := creds.Get(registryURL); !ok {
+		fmt.Printf("Not logged in to %s\n", registryURL)
+		return nil
+	}
+	creds.Delete(registryURL)
+	if err := creds.Save(home); err != nil {
+		return err
+	}
+	fmt.Printf("✓ Logged out from %s\n", registryURL)
+	return nil
+}
+
+// ─── whoami ───────────────────────────────────────────────────────────────────
+
+func cmdWhoami(_ []string) error {
+	home, err := fglpkgHome()
+	if err != nil {
+		return err
+	}
+	registryURL := defaultRegistry()
+	token := credentials.TokenFor(home, registryURL)
+	if token == "" {
+		return fmt.Errorf("not logged in to %s\nRun 'fglpkg login' first", registryURL)
+	}
+	username, err := whoamiRequest(registryURL, token)
+	if err != nil {
+		return fmt.Errorf("whoami failed: %w", err)
+	}
+	fmt.Printf("Logged in to %s as %s\n", registryURL, username)
+	return nil
+}
+
+// ─── owner ────────────────────────────────────────────────────────────────────
+
+func cmdOwner(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: fglpkg owner <list|add|remove> <package> [username]")
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "list":
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: fglpkg owner list <package>")
+		}
+		return cmdOwnerList(rest[0])
+	case "add":
+		if len(rest) < 2 {
+			return fmt.Errorf("usage: fglpkg owner add <package> <username>")
+		}
+		return cmdOwnerAdd(rest[0], rest[1])
+	case "remove":
+		if len(rest) < 2 {
+			return fmt.Errorf("usage: fglpkg owner remove <package> <username>")
+		}
+		return cmdOwnerRemove(rest[0], rest[1])
+	default:
+		return fmt.Errorf("unknown owner subcommand %q", sub)
+	}
+}
+
+func cmdOwnerList(pkg string) error {
+	home, _ := fglpkgHome()
+	reg := defaultRegistry()
+	token := credentials.TokenFor(home, reg)
+	resp, err := authGet(reg+"/packages/"+pkg+"/owners", token)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return registryError(resp)
+	}
+	var result struct {
+		Owners []string `json:"owners"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+	fmt.Printf("Owners of %s:\n", pkg)
+	for _, o := range result.Owners {
+		fmt.Printf("  %s\n", o)
+	}
+	return nil
+}
+
+func cmdOwnerAdd(pkg, username string) error {
+	home, _ := fglpkgHome()
+	reg := defaultRegistry()
+	token := credentials.TokenFor(home, reg)
+	if token == "" {
+		return fmt.Errorf("not logged in — run 'fglpkg login'")
+	}
+	body := fmt.Sprintf(`{"username":%q}`, username)
+	resp, err := authPost(reg+"/packages/"+pkg+"/owners", token, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return registryError(resp)
+	}
+	fmt.Printf("✓ Added %s as owner of %s\n", username, pkg)
+	return nil
+}
+
+func cmdOwnerRemove(pkg, username string) error {
+	home, _ := fglpkgHome()
+	reg := defaultRegistry()
+	token := credentials.TokenFor(home, reg)
+	if token == "" {
+		return fmt.Errorf("not logged in — run 'fglpkg login'")
+	}
+	req, _ := http.NewRequest(http.MethodDelete,
+		reg+"/packages/"+pkg+"/owners/"+username, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return registryError(resp)
+	}
+	fmt.Printf("✓ Removed %s from owners of %s\n", username, pkg)
+	return nil
+}
+
+// ─── token ────────────────────────────────────────────────────────────────────
+
+func cmdToken(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: fglpkg token <create|revoke|rotate> [username]")
+	}
+	sub, rest := args[0], args[1:]
+	home, _ := fglpkgHome()
+	reg := defaultRegistry()
+	token := credentials.TokenFor(home, reg)
+	if token == "" {
+		return fmt.Errorf("not logged in — run 'fglpkg login'")
+	}
+
+	switch sub {
+	case "create":
+		username := ""
+		if len(rest) > 0 {
+			username = rest[0]
+		} else {
+			username = promptWithDefault("New username", "")
+		}
+		email := promptWithDefault("Email (optional)", "")
+		body := fmt.Sprintf(`{"username":%q,"email":%q}`, username, email)
+		resp, err := authPost(reg+"/auth/token", token, body)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			return registryError(resp)
+		}
+		var result map[string]string
+		json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+		fmt.Printf("✓ Created user %s\nToken: %s\n⚠ Save this token — it will not be shown again.\n",
+			result["username"], result["token"])
+
+	case "revoke":
+		target := ""
+		if len(rest) > 0 {
+			target = rest[0]
+		}
+		body := ""
+		if target != "" {
+			body = fmt.Sprintf(`{"username":%q}`, target)
+		}
+		resp, err := authDo(http.MethodDelete, reg+"/auth/token", token, body)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return registryError(resp)
+		}
+		if target != "" {
+			fmt.Printf("✓ Revoked token for %s\n", target)
+		} else {
+			fmt.Println("✓ Token revoked")
+		}
+
+	case "rotate":
+		resp, err := authPost(reg+"/auth/token/rotate", token, "")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return registryError(resp)
+		}
+		var result map[string]string
+		json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+		fmt.Printf("✓ Token rotated\nNew token: %s\n⚠ Save this token — it will not be shown again.\n",
+			result["token"])
+
+	default:
+		return fmt.Errorf("unknown token subcommand %q", sub)
+	}
+	return nil
+}
+
+// ─── workspace ────────────────────────────────────────────────────────────────
 
 func cmdWorkspace(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: fglpkg workspace <subcommand>\n" +
-			"subcommands: init, add, list, info")
+		return fmt.Errorf("usage: fglpkg workspace <init|add|list|info>")
 	}
-	sub := args[0]
-	rest := args[1:]
-
-	switch sub {
+	switch args[0] {
 	case "init":
-		return cmdWorkspaceInit(rest)
+		return cmdWorkspaceInit(args[1:])
 	case "add":
-		return cmdWorkspaceAdd(rest)
+		return cmdWorkspaceAdd(args[1:])
 	case "list":
 		return cmdWorkspaceList()
 	case "info":
 		return cmdWorkspaceInfo()
 	default:
-		return fmt.Errorf("unknown workspace subcommand %q", sub)
+		return fmt.Errorf("unknown workspace subcommand %q", args[0])
 	}
 }
 
-// cmdWorkspaceInit creates a new fglpkg.workspace.json in the current directory.
 func cmdWorkspaceInit(args []string) error {
 	if workspace.Exists(".") {
 		return fmt.Errorf("%s already exists in the current directory", workspace.WorkspaceFilename)
 	}
-	members := args // remaining args are member paths
-	if len(members) == 0 {
-		fmt.Println("No members specified — creating empty workspace.")
-		fmt.Println("Use 'fglpkg workspace add <path>' to add members.")
-	}
-	if err := workspace.Init(".", members); err != nil {
+	if err := workspace.Init(".", args); err != nil {
 		return err
 	}
 	fmt.Printf("✓ Created %s\n", workspace.WorkspaceFilename)
-	if len(members) > 0 {
-		fmt.Printf("  Members: %s\n", strings.Join(members, ", "))
-	}
 	return nil
 }
 
-// cmdWorkspaceAdd adds a new member path to the current workspace.
 func cmdWorkspaceAdd(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: fglpkg workspace add <path>")
@@ -346,7 +641,6 @@ func cmdWorkspaceAdd(args []string) error {
 	return nil
 }
 
-// cmdWorkspaceList lists workspace members.
 func cmdWorkspaceList() error {
 	wsRoot := workspace.FindRoot(".")
 	if wsRoot == "" {
@@ -363,7 +657,6 @@ func cmdWorkspaceList() error {
 	return nil
 }
 
-// cmdWorkspaceInfo prints a detailed workspace summary.
 func cmdWorkspaceInfo() error {
 	wsRoot := workspace.FindRoot(".")
 	if wsRoot == "" {
@@ -377,105 +670,65 @@ func cmdWorkspaceInfo() error {
 	return nil
 }
 
+// ─── Auth HTTP helpers ────────────────────────────────────────────────────────
 
-func cmdRemove(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: fglpkg remove <package>")
-	}
-
-	home, err := fglpkgHome()
+func whoamiRequest(registryURL, token string) (string, error) {
+	resp, err := authGet(strings.TrimRight(registryURL, "/")+"/auth/whoami", token)
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	m, err := manifest.Load(".")
-	if err != nil {
-		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", fmt.Errorf("invalid token")
 	}
-
-	inst := installer.New(home)
-	for _, pkg := range args {
-		if err := inst.Remove(pkg); err != nil {
-			return fmt.Errorf("failed to remove %s: %w", pkg, err)
-		}
-		m.RemoveFGLDependency(pkg)
-		fmt.Printf("✓ Removed %s\n", pkg)
+	if resp.StatusCode != http.StatusOK {
+		return "", registryError(resp)
 	}
-
-	return m.Save(".")
+	var result struct {
+		Username string `json:"username"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+	return result.Username, nil
 }
 
-// cmdList shows all installed packages.
-func cmdList(_ []string) error {
-	home, err := fglpkgHome()
-	if err != nil {
-		return err
-	}
-
-	inst := installer.New(home)
-	pkgs, err := inst.List()
-	if err != nil {
-		return err
-	}
-
-	if len(pkgs) == 0 {
-		fmt.Println("No packages installed.")
-		return nil
-	}
-
-	fmt.Println("Installed packages:")
-	for _, p := range pkgs {
-		fmt.Printf("  %-30s %s\n", p.Name, p.Version)
-	}
-	return nil
+func authGet(url, token string) (*http.Response, error) {
+	return authDo(http.MethodGet, url, token, "")
 }
 
-// cmdEnv prints the environment variable exports needed for Genero BDL.
-func cmdEnv(_ []string) error {
-	home, err := fglpkgHome()
-	if err != nil {
-		return err
-	}
-
-	e := env.New(home)
-	exports, err := e.Generate()
-	if err != nil {
-		return err
-	}
-
-	for _, line := range exports {
-		fmt.Println(line)
-	}
-	return nil
+func authPost(url, token, body string) (*http.Response, error) {
+	return authDo(http.MethodPost, url, token, body)
 }
 
-// cmdSearch searches the registry for packages.
-func cmdSearch(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: fglpkg search <term>")
+func authDo(method, url, token, body string) (*http.Response, error) {
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
 	}
-
-	term := args[0]
-	results, err := registry.Search(term)
+	req, err := http.NewRequest(method, url, bodyReader)
 	if err != nil {
-		return fmt.Errorf("search failed: %w", err)
+		return nil, err
 	}
-
-	if len(results) == 0 {
-		fmt.Printf("No packages found matching %q\n", term)
-		return nil
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
-
-	fmt.Printf("Results for %q:\n", term)
-	fmt.Printf("  %-30s %-12s %s\n", "NAME", "VERSION", "DESCRIPTION")
-	fmt.Printf("  %-30s %-12s %s\n", "----", "-------", "-----------")
-	for _, r := range results {
-		fmt.Printf("  %-30s %-12s %s\n", r.Name, r.LatestVersion, r.Description)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
 	}
-	return nil
+	return http.DefaultClient.Do(req)
 }
 
-// --- Helpers ---
+func registryError(resp *http.Response) error {
+	var e struct {
+		Error string `json:"error"`
+	}
+	json.NewDecoder(resp.Body).Decode(&e) //nolint:errcheck
+	if e.Error != "" {
+		return fmt.Errorf("registry error (%d): %s", resp.StatusCode, e.Error)
+	}
+	return fmt.Errorf("registry returned HTTP %d", resp.StatusCode)
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
 
 func printUsage() {
 	fmt.Print(`fglpkg - Genero BDL Package Manager
@@ -484,26 +737,31 @@ USAGE:
   fglpkg <command> [arguments]
 
 COMMANDS:
-  init              Create a new fglpkg.json in the current directory
-  install           Install all dependencies from fglpkg.json
-  install <pkg>     Add and install a specific package
+  init              Create a new fglpkg.json
+  install           Install all dependencies (or add a specific package)
   remove <pkg>      Remove a package
+  update            Re-resolve and update all dependencies
   list              List installed packages
-  env               Print environment variable exports (use with eval)
-  search <term>     Search the package registry
+  env               Print environment variable exports
+  search <term>     Search the registry
+  publish           Publish current package to registry
+  login             Save registry credentials
+  logout            Remove saved credentials
+  whoami            Show current authenticated user
+  owner             Manage package ownership
+  token             Manage user tokens (admin)
+  workspace         Manage monorepo workspaces
   version           Print fglpkg version
-  help              Show this help message
+  help              Show this help
 
-ENVIRONMENT SETUP:
-  Add this to your .bashrc or .profile:
-    eval "$(fglpkg env)"
+ENVIRONMENT:
+  FGLPKG_HOME            Override ~/.fglpkg
+  FGLPKG_REGISTRY        Override default registry URL
+  FGLPKG_PUBLISH_TOKEN   Admin/publish token (bypasses credentials file)
+  FGLPKG_GENERO_VERSION  Override Genero version detection
 
-EXAMPLES:
-  fglpkg init
-  fglpkg install myutils
-  fglpkg install myutils@1.2.0
-  fglpkg env
-  fglpkg search json
+SETUP:
+  Add to ~/.bashrc:  eval "$(fglpkg env)"
 
 `)
 }
@@ -519,6 +777,13 @@ func fglpkgHome() (string, error) {
 	return home + "/.fglpkg", nil
 }
 
+func defaultRegistry() string {
+	if r := os.Getenv("FGLPKG_REGISTRY"); r != "" {
+		return strings.TrimRight(r, "/")
+	}
+	return "https://registry.fglpkg.dev"
+}
+
 func parsePackageArg(arg string) (name, version string, err error) {
 	for i, c := range arg {
 		if c == '@' && i > 0 {
@@ -528,7 +793,7 @@ func parsePackageArg(arg string) (name, version string, err error) {
 	return arg, "latest", nil
 }
 
-func filepath_base() string {
+func filepathBase() string {
 	dir, _ := os.Getwd()
 	for i := len(dir) - 1; i >= 0; i-- {
 		if dir[i] == '/' || dir[i] == '\\' {
