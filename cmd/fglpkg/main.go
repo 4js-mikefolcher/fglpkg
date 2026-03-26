@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/yourusername/fglpkg/internal/cli"
+	"github.com/4js-mikefolcher/fglpkg/internal/cli"
 )
 
 func main() {

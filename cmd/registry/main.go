@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/yourusername/fglpkg/internal/registry/server"
+	"github.com/4js-mikefolcher/fglpkg/internal/registry/server"
 )
 
 func main() {
