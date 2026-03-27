@@ -2,6 +2,7 @@ package cli
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,6 +22,10 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/workspace"
 )
+
+// reader is a package-level buffered stdin reader shared across all prompts
+// so buffered input is never lost between successive promptWithDefault calls.
+var reader = bufio.NewReader(os.Stdin)
 
 // Execute is the main CLI entry point.
 func Execute() error {
@@ -207,6 +212,20 @@ func cmdEnv(_ []string) error {
 		return err
 	}
 	for _, line := range exports {
+		// Re-emit each export with proper shell quoting so paths containing
+		// spaces work correctly with eval "$(fglpkg env)".
+		if strings.HasPrefix(line, "export ") {
+			rest := strings.TrimPrefix(line, "export ")
+			idx := strings.IndexByte(rest, '=')
+			if idx > 0 {
+				key := rest[:idx]
+				value := rest[idx+1:]
+				// Strip any existing quotes the generator may have added.
+				value = strings.Trim(value, "'\"")
+				fmt.Println(quotedExportLine(key, value))
+				continue
+			}
+		}
 		fmt.Println(line)
 	}
 	return nil
@@ -320,7 +339,16 @@ func buildPackageZip(m *manifest.Manifest) ([]byte, string, error) {
 	var buf bytes.Buffer
 	h := sha256.New()
 	zw := zip.NewWriter(io.MultiWriter(&buf, h))
-	for _, pattern := range []string{"*.42m", "*.42f", "*.sch", manifest.Filename} {
+
+	// Use manifest's files list if specified, otherwise use defaults.
+	patterns := m.Files
+	if len(patterns) == 0 {
+		patterns = []string{"*.42m", "*.42f", "*.sch"}
+	}
+	// Always include the manifest itself.
+	patterns = append(patterns, manifest.Filename)
+
+	for _, pattern := range patterns {
 		matches, _ := filepath.Glob(pattern)
 		for _, match := range matches {
 			if err := addFileToZip(zw, match); err != nil {
@@ -803,14 +831,29 @@ func filepathBase() string {
 	return dir
 }
 
+// quotedExportLine wraps a shell export value in single quotes so that paths
+// containing spaces work correctly with eval "$(fglpkg env)".
+func quotedExportLine(key, value string) string {
+	// Escape any literal single quotes inside the value using the '\\'' idiom.
+	escaped := strings.ReplaceAll(value, "'", "'\\''")
+	return fmt.Sprintf("export %s='%s'", key, escaped)
+}
+
+// promptWithDefault prints a prompt and reads a full line from stdin,
+// supporting spaces in the input. Returns def if the user presses enter
+// without typing anything.
 func promptWithDefault(label, def string) string {
 	if def != "" {
 		fmt.Printf("%s (%s): ", label, def)
 	} else {
 		fmt.Printf("%s: ", label)
 	}
-	var val string
-	fmt.Scanln(&val)
+	val, err := reader.ReadString('\n')
+	if err != nil && len(val) == 0 {
+		return def
+	}
+	// Trim CR and LF to handle both Unix (\n) and Windows (\r\n) line endings.
+	val = strings.TrimRight(val, "\r\n")
 	if val == "" {
 		return def
 	}
