@@ -127,6 +127,7 @@ func cmdInstall(args []string) error {
 
 	if local {
 		fmt.Println("Installing to local project directory (.fglpkg/)")
+		fmt.Println("  Tip: add .fglpkg/ to your .gitignore file")
 	}
 
 	if len(pkgArgs) == 0 {
