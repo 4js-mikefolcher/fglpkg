@@ -33,6 +33,5 @@ go.work.sum
 
 # Directories
 bin/
-
-# Claude files
-.claude
+.claude/
+.github/
