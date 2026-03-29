@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/4js-mikefolcher/fglpkg/internal/credentials"
 	"github.com/4js-mikefolcher/fglpkg/internal/env"
+	gh "github.com/4js-mikefolcher/fglpkg/internal/github"
 	"github.com/4js-mikefolcher/fglpkg/internal/installer"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
@@ -60,6 +60,8 @@ func Execute() error {
 		return cmdSearch(args)
 	case "publish":
 		return cmdPublish(args)
+	case "unpublish":
+		return cmdUnpublish(args)
 	case "login":
 		return cmdLogin(args)
 	case "logout":
@@ -108,7 +110,7 @@ func cmdInstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	inst := installer.New(home)
+	inst := newInstaller(home)
 	projectDir, _ := os.Getwd()
 
 	if len(args) == 0 {
@@ -157,7 +159,7 @@ func cmdRemove(args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
 	}
-	inst := installer.New(home)
+	inst := newInstaller(home)
 	for _, pkg := range args {
 		if err := inst.Remove(pkg); err != nil {
 			return fmt.Errorf("failed to remove %s: %w", pkg, err)
@@ -181,7 +183,7 @@ func cmdUpdate(_ []string) error {
 	}
 	projectDir, _ := os.Getwd()
 	fmt.Println("Ignoring lock file and re-resolving all dependencies...")
-	return installer.New(home).InstallAll(m, projectDir, true)
+	return newInstaller(home).InstallAll(m, projectDir, true)
 }
 
 // ─── list ─────────────────────────────────────────────────────────────────────
@@ -191,7 +193,7 @@ func cmdList(_ []string) error {
 	if err != nil {
 		return err
 	}
-	pkgs, err := installer.New(home).List()
+	pkgs, err := newInstaller(home).List()
 	if err != nil {
 		return err
 	}
@@ -265,21 +267,49 @@ func cmdPublish(_ []string) error {
 	if token == "" {
 		return fmt.Errorf("not logged in to %s\nRun 'fglpkg login' or set FGLPKG_PUBLISH_TOKEN", registryURL)
 	}
+	githubToken := credentials.GitHubTokenFor(home, registryURL)
+	if githubToken == "" {
+		return fmt.Errorf("GitHub token required for publishing\nSet FGLPKG_GITHUB_TOKEN or run 'fglpkg login'")
+	}
+	owner, repo, err := gh.RepoFromEnv()
+	if err != nil {
+		return err
+	}
+
 	fmt.Printf("Publishing %s@%s to %s...\n", m.Name, m.Version, registryURL)
-	if err := publishPackage(m, token, registryURL); err != nil {
+	if err := publishPackage(m, token, registryURL, githubToken, owner, repo); err != nil {
 		return fmt.Errorf("publish failed: %w", err)
 	}
 	fmt.Printf("✓ Published %s@%s\n", m.Name, m.Version)
 	return nil
 }
 
-func publishPackage(m *manifest.Manifest, token, registryURL string) error {
+func publishPackage(m *manifest.Manifest, token, registryURL, githubToken, owner, repo string) error {
+	// 1. Build the zip.
 	zipData, checksum, err := buildPackageZip(m)
 	if err != nil {
 		return fmt.Errorf("cannot build package zip: %w", err)
 	}
 	fmt.Printf("  Package zip: %d bytes (SHA256: %s)\n", len(zipData), checksum)
 
+	// 2. Upload to GitHub Releases.
+	tag := gh.ReleaseTag(m.Name, m.Version)
+	assetName := gh.AssetName(m.Name, m.Version)
+	title := fmt.Sprintf("%s v%s", m.Name, m.Version)
+
+	fmt.Printf("  Uploading to GitHub (%s/%s)...\n", owner, repo)
+	releaseID, err := gh.GetOrCreateRelease(githubToken, owner, repo, tag, title)
+	if err != nil {
+		return fmt.Errorf("GitHub release failed: %w", err)
+	}
+
+	downloadURL, err := gh.UploadAsset(githubToken, owner, repo, releaseID, assetName, zipData)
+	if err != nil {
+		return fmt.Errorf("GitHub upload failed: %w", err)
+	}
+	fmt.Printf("  Uploaded to GitHub: %s\n", downloadURL)
+
+	// 3. Register metadata with the registry (JSON-only, no zip).
 	meta := map[string]any{
 		"description": m.Description,
 		"author":      m.Author,
@@ -287,6 +317,7 @@ func publishPackage(m *manifest.Manifest, token, registryURL string) error {
 		"genero":      m.GeneroConstraint,
 		"fglDeps":     m.Dependencies.FGL,
 		"checksum":    checksum,
+		"downloadUrl": downloadURL,
 	}
 	if len(m.Dependencies.Java) > 0 {
 		meta["javaDeps"] = m.Dependencies.Java
@@ -296,23 +327,13 @@ func publishPackage(m *manifest.Manifest, token, registryURL string) error {
 		return err
 	}
 
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	mw.WriteField("meta", string(metaJSON)) //nolint:errcheck
-	fw, err := mw.CreateFormFile("zip", m.Name+"-"+m.Version+".zip")
-	if err != nil {
-		return err
-	}
-	fw.Write(zipData) //nolint:errcheck
-	mw.Close()
-
 	url := fmt.Sprintf("%s/packages/%s/%s/publish",
 		strings.TrimRight(registryURL, "/"), m.Name, m.Version)
-	req, err := http.NewRequest(http.MethodPost, url, &body)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(metaJSON))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := http.DefaultClient.Do(req)
@@ -322,7 +343,8 @@ func publishPackage(m *manifest.Manifest, token, registryURL string) error {
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("registry returned %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("package uploaded to GitHub but registry metadata update failed (%d: %s)\nRe-run 'fglpkg publish' to retry",
+			resp.StatusCode, string(respBody))
 	}
 	return nil
 }
@@ -407,6 +429,70 @@ func addFileToZip(zw *zip.Writer, diskPath, zipPath string) error {
 	return err
 }
 
+// ─── unpublish ────────────────────────────────────────────────────────────────
+
+func cmdUnpublish(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: fglpkg unpublish <package>@<version>")
+	}
+	name, version, err := parsePackageArg(args[0])
+	if err != nil {
+		return err
+	}
+	if version == "" || version == "latest" {
+		return fmt.Errorf("a specific version is required: fglpkg unpublish <package>@<version>")
+	}
+
+	home, err := fglpkgHome()
+	if err != nil {
+		return err
+	}
+	registryURL := defaultRegistry()
+	token := credentials.TokenFor(home, registryURL)
+	if token == "" {
+		return fmt.Errorf("not logged in to %s\nRun 'fglpkg login' or set FGLPKG_PUBLISH_TOKEN", registryURL)
+	}
+
+	fmt.Printf("Unpublishing %s@%s...\n", name, version)
+
+	// 1. Delete the GitHub Release (and its asset).
+	githubToken := credentials.GitHubTokenFor(home, registryURL)
+	if githubToken != "" {
+		owner, repo, err := gh.RepoFromEnv()
+		if err == nil {
+			tag := gh.ReleaseTag(name, version)
+			fmt.Printf("  Deleting GitHub release %s...\n", tag)
+			if err := gh.DeleteRelease(githubToken, owner, repo, tag); err != nil {
+				fmt.Printf("  Warning: could not delete GitHub release: %v\n", err)
+			} else {
+				fmt.Println("  Deleted GitHub release")
+			}
+		}
+	}
+
+	// 2. Remove metadata from the registry.
+	url := fmt.Sprintf("%s/packages/%s/%s/unpublish",
+		strings.TrimRight(registryURL, "/"), name, version)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("registry request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("registry returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	fmt.Printf("✓ Unpublished %s@%s\n", name, version)
+	return nil
+}
+
 // ─── login ────────────────────────────────────────────────────────────────────
 
 func cmdLogin(_ []string) error {
@@ -428,10 +514,21 @@ func cmdLogin(_ []string) error {
 		return err
 	}
 	creds.Set(registryURL, token, username)
+
+	githubToken := promptWithDefault("GitHub token (optional, for package downloads)", "")
+	if githubToken != "" {
+		creds.SetGitHubToken(registryURL, githubToken)
+	}
+
 	if err := creds.Save(home); err != nil {
 		return err
 	}
 	fmt.Printf("✓ Logged in to %s as %s\n", registryURL, username)
+	if githubToken != "" {
+		fmt.Println("✓ GitHub token saved for package downloads")
+	} else {
+		fmt.Println("  GitHub token skipped (set FGLPKG_GITHUB_TOKEN for downloads from private repos)")
+	}
 	return nil
 }
 
@@ -476,6 +573,12 @@ func cmdWhoami(_ []string) error {
 		return fmt.Errorf("whoami failed: %w", err)
 	}
 	fmt.Printf("Logged in to %s as %s\n", registryURL, username)
+	ghToken := credentials.GitHubTokenFor(home, registryURL)
+	if ghToken != "" {
+		fmt.Println("GitHub token: configured")
+	} else {
+		fmt.Println("GitHub token: not configured (set FGLPKG_GITHUB_TOKEN or run fglpkg login)")
+	}
 	return nil
 }
 
@@ -804,6 +907,7 @@ COMMANDS:
   env               Print environment variable exports
   search <term>     Search the registry
   publish           Publish current package to registry
+  unpublish <p>@<v> Remove a published version from registry + GitHub
   login             Save registry credentials
   logout            Remove saved credentials
   whoami            Show current authenticated user
@@ -817,6 +921,8 @@ ENVIRONMENT:
   FGLPKG_HOME            Override ~/.fglpkg
   FGLPKG_REGISTRY        Override default registry URL
   FGLPKG_PUBLISH_TOKEN   Admin/publish token (bypasses credentials file)
+  FGLPKG_GITHUB_TOKEN    GitHub PAT for package uploads/downloads (private repo)
+  FGLPKG_GITHUB_REPO     GitHub owner/repo for package storage
   FGLPKG_GENERO_VERSION  Override Genero version detection
 
 SETUP:
@@ -834,6 +940,12 @@ func fglpkgHome() (string, error) {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 	return home + "/.fglpkg", nil
+}
+
+func newInstaller(home string) *installer.Installer {
+	registryURL := defaultRegistry()
+	githubToken := credentials.GitHubTokenFor(home, registryURL)
+	return installer.New(home, githubToken)
 }
 
 func defaultRegistry() string {

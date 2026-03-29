@@ -298,6 +298,8 @@ func (h *handler) handlePackages(w http.ResponseWriter, r *http.Request) {
 		h.handleDownload(w, r, parts[0], parts[1])
 	case len(parts) == 3 && parts[2] == "publish":
 		h.handlePublish(w, r, parts[0], parts[1])
+	case len(parts) == 3 && parts[2] == "unpublish":
+		h.handleUnpublish(w, r, parts[0], parts[1])
 	default:
 		writeError(w, http.StatusNotFound, "unknown route")
 	}
@@ -417,6 +419,7 @@ type publishRequest struct {
 	FGLDeps          map[string]string `json:"fglDeps,omitempty"`
 	JavaDeps         []javaDep         `json:"javaDeps,omitempty"`
 	Checksum         string            `json:"checksum"`
+	DownloadURL      string            `json:"downloadUrl,omitempty"`
 }
 
 type javaDep struct {
@@ -463,6 +466,53 @@ func (h *handler) handlePublish(w http.ResponseWriter, r *http.Request, name, ve
 		}
 	}
 
+	// Dispatch based on Content-Type: JSON-only (new CLI with external
+	// storage like GitHub Releases) or multipart (legacy CLI with zip upload).
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "application/json") {
+		h.handlePublishJSON(w, r, name, version, ar)
+	} else {
+		h.handlePublishMultipart(w, r, name, version, ar)
+	}
+}
+
+// handlePublishJSON handles metadata-only publishes where the zip is hosted
+// externally (e.g., GitHub Releases). The client provides the download URL.
+func (h *handler) handlePublishJSON(w http.ResponseWriter, r *http.Request, name, version string, ar authResult) {
+	var meta publishRequest
+	if err := json.NewDecoder(r.Body).Decode(&meta); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if meta.DownloadURL == "" {
+		writeError(w, http.StatusBadRequest, "downloadUrl is required for JSON publishes")
+		return
+	}
+	if meta.Checksum == "" {
+		writeError(w, http.StatusBadRequest, "checksum is required for JSON publishes")
+		return
+	}
+
+	if err := h.store.savePackageMetadata(name, version, meta); err != nil {
+		log.Printf("publish error for %s@%s: %v", name, version, err)
+		writeError(w, http.StatusInternalServerError, "failed to save package metadata")
+		return
+	}
+
+	h.auth.claimOwnership(name, ar.Username) //nolint:errcheck
+
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"name":        name,
+		"version":     version,
+		"checksum":    meta.Checksum,
+		"downloadUrl": meta.DownloadURL,
+	})
+	log.Printf("published %s@%s by %s (external: %s)", name, version, ar.Username, meta.DownloadURL)
+}
+
+// handlePublishMultipart handles legacy publishes where the zip is uploaded
+// as part of a multipart form alongside metadata.
+func (h *handler) handlePublishMultipart(w http.ResponseWriter, r *http.Request, name, version string, ar authResult) {
 	if err := r.ParseMultipartForm(128 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "cannot parse multipart form: "+err.Error())
 		return
@@ -486,14 +536,13 @@ func (h *handler) handlePublish(w http.ResponseWriter, r *http.Request, name, ve
 	}
 	defer zipFile.Close()
 
-        checksum, downloadURL, err := h.store.savePackage(name, version, meta, zipFile)
+	checksum, downloadURL, err := h.store.savePackage(name, version, meta, zipFile)
 	if err != nil {
 		log.Printf("publish error for %s@%s: %v", name, version, err)
 		writeError(w, http.StatusInternalServerError, "failed to save package")
 		return
 	}
 
-	// Verify client-declared checksum.
 	if meta.Checksum != "" && !strings.EqualFold(checksum, meta.Checksum) {
 		h.store.deleteVersion(name, version) //nolint:errcheck
 		writeError(w, http.StatusBadRequest,
@@ -502,16 +551,59 @@ func (h *handler) handlePublish(w http.ResponseWriter, r *http.Request, name, ve
 		return
 	}
 
-	// Claim ownership for new packages.
-	h.auth.claimOwnership(name, ar.Username) //nolint:errcheck — no-op if already owned
+	h.auth.claimOwnership(name, ar.Username) //nolint:errcheck
 
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"name":        name,
 		"version":     version,
 		"checksum":    checksum,
-                "downloadUrl": downloadURL,
+		"downloadUrl": downloadURL,
 	})
 	log.Printf("published %s@%s by %s (checksum: %s)", name, version, ar.Username, checksum)
+}
+
+// ─── DELETE /packages/:name/:version/unpublish ────────────────────────────────
+
+func (h *handler) handleUnpublish(w http.ResponseWriter, r *http.Request, name, version string) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "DELETE only")
+		return
+	}
+
+	ar, ok := h.requireAuth(w, r)
+	if !ok {
+		return
+	}
+
+	if !h.auth.canPublish(name, ar.Username, ar.IsAdmin) {
+		writeError(w, http.StatusForbidden,
+			fmt.Sprintf("you are not an owner of %q", name))
+		return
+	}
+
+	pkg, err := h.store.loadPackage(name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "package not found")
+		return
+	}
+	if pkg.findVersion(version) == nil {
+		writeError(w, http.StatusNotFound,
+			fmt.Sprintf("version %s of %s not found", version, name))
+		return
+	}
+
+	if err := h.store.deleteVersion(name, version); err != nil {
+		log.Printf("unpublish error for %s@%s: %v", name, version, err)
+		writeError(w, http.StatusInternalServerError, "failed to delete version")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"name":    name,
+		"version": version,
+		"message": "version unpublished",
+	})
+	log.Printf("unpublished %s@%s by %s", name, version, ar.Username)
 }
 
 // ─── /packages/:name/owners ───────────────────────────────────────────────────

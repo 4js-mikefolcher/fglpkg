@@ -261,21 +261,52 @@ By default, fglpkg collects files matching `*.42m`, `*.42f`, and `*.sch`. To cus
 }
 ```
 
+### GitHub Setup (Required for Publishing and Installing)
+
+Package zips are stored as GitHub Release assets on a private repository. The fglpkg registry server stores only metadata.
+
+**One-time setup:**
+
+1. Create a private GitHub repository for package storage (e.g., `4js-mikefolcher/fglpkg-packages`)
+2. Create a GitHub Personal Access Token:
+   - **Publishers**: fine-grained token with **Contents: Read and write** on the packages repo
+   - **Consumers**: fine-grained token with **Contents: Read** on the packages repo
+3. Set the packages repo:
+   ```bash
+   export FGLPKG_GITHUB_REPO=4js-mikefolcher/fglpkg-packages
+   ```
+
 ### Publishing
 
-First, authenticate with the registry:
+Authenticate with both the registry and GitHub:
 
 ```bash
 fglpkg login
 ```
 
-Then publish:
+This prompts for your registry token and GitHub token. Both are stored in `~/.fglpkg/credentials.json`.
+
+Set the target GitHub repo, then publish:
 
 ```bash
+export FGLPKG_GITHUB_REPO=4js-mikefolcher/fglpkg-packages
 fglpkg publish
 ```
 
-This builds a zip of your package files, computes a SHA256 checksum, and uploads it to the registry.
+The publish flow:
+1. Builds a zip of your package files and computes the SHA256 checksum
+2. Creates a GitHub Release tagged `{name}-v{version}` and uploads the zip as an asset
+3. Registers the metadata (including the GitHub download URL) with the registry server
+
+### Unpublishing a Version
+
+To remove a published version from both the registry and GitHub:
+
+```bash
+fglpkg unpublish poiapi@1.0.0
+```
+
+This deletes the GitHub Release (and its zip asset) and removes the version metadata from the registry. You must be an owner of the package.
 
 ### Genero Version Constraints
 
@@ -337,9 +368,11 @@ $ fglpkg login
 Registry URL (https://registry.fglpkg.dev):
 Token: my-secret-token
 ✓ Logged in to https://registry.fglpkg.dev as jdeveloper
+GitHub token (optional, for package downloads): ghp_xxxxxxxxxxxx
+✓ GitHub token saved for package downloads
 ```
 
-Credentials are stored in `~/.fglpkg/credentials.json`.
+Credentials (both registry and GitHub tokens) are stored in `~/.fglpkg/credentials.json`.
 
 ### Checking Your Identity
 
@@ -354,13 +387,22 @@ Logged in to https://registry.fglpkg.dev as jdeveloper
 fglpkg logout
 ```
 
-### Using a Token Directly
+### Using Tokens Directly (CI/CD)
 
-For CI/CD environments, set the token as an environment variable instead of using `fglpkg login`:
+For CI/CD environments, set tokens as environment variables instead of using `fglpkg login`:
 
 ```bash
 export FGLPKG_PUBLISH_TOKEN=my-secret-token
+export FGLPKG_GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+export FGLPKG_GITHUB_REPO=4js-mikefolcher/fglpkg-packages
 fglpkg publish
+```
+
+For install-only CI jobs, only the GitHub token is needed:
+
+```bash
+export FGLPKG_GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+fglpkg install
 ```
 
 ### Token Management (Admin)

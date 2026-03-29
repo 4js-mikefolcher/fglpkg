@@ -204,6 +204,53 @@ func (s *fileStore) savePackage(
 	return checksum, publicURL, nil
 }
 
+// savePackageMetadata stores only the metadata for a version whose zip is
+// hosted externally (e.g., GitHub Releases). No blob storage is involved.
+func (s *fileStore) savePackageMetadata(name, version string, meta publishRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(s.metaPath(name)), 0755); err != nil {
+		return fmt.Errorf("cannot create metadata dir: %w", err)
+	}
+
+	var pm packageMeta
+	if existing, err := s.loadPackageLocked(name); err == nil {
+		pm = *existing
+	} else {
+		pm = packageMeta{Name: name}
+	}
+
+	pm.Versions = append(pm.Versions, &versionRecord{
+		Version:          version,
+		Description:      meta.Description,
+		Author:           meta.Author,
+		License:          meta.License,
+		GeneroConstraint: meta.GeneroConstraint,
+		DownloadURL:      meta.DownloadURL,
+		Checksum:         meta.Checksum,
+		FGLDeps:          meta.FGLDeps,
+		JavaDeps:         meta.JavaDeps,
+		PublishedAt:      time.Now().UTC().Format(time.RFC3339),
+	})
+
+	if err := atomicWriteJSON(s.metaPath(name), &pm); err != nil {
+		return fmt.Errorf("cannot update package meta: %w", err)
+	}
+
+	s.index.Packages[name] = &indexEntry{
+		Name:          name,
+		LatestVersion: version,
+		Description:   meta.Description,
+		Author:        meta.Author,
+	}
+	if err := s.saveIndexLocked(); err != nil {
+		return fmt.Errorf("cannot update index: %w", err)
+	}
+
+	return nil
+}
+
 // deleteVersion removes a version's blob and strips its record from meta.json.
 // Used for checksum-mismatch rollback.
 func (s *fileStore) deleteVersion(name, version string) error {

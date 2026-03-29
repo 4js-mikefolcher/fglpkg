@@ -11,6 +11,7 @@ import (
 
 	"github.com/4js-mikefolcher/fglpkg/internal/checksum"
 	"github.com/4js-mikefolcher/fglpkg/internal/genero"
+	gh "github.com/4js-mikefolcher/fglpkg/internal/github"
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
@@ -28,14 +29,17 @@ type Installer struct {
 	home        string // e.g. ~/.fglpkg
 	packagesDir string // ~/.fglpkg/packages
 	jarsDir     string // ~/.fglpkg/jars
+	githubToken string // GitHub PAT for downloading from private repos
 }
 
-// New creates an Installer rooted at home.
-func New(home string) *Installer {
+// New creates an Installer rooted at home. The githubToken is used to
+// authenticate downloads from private GitHub repos; pass "" if not needed.
+func New(home, githubToken string) *Installer {
 	return &Installer{
 		home:        home,
 		packagesDir: filepath.Join(home, "packages"),
 		jarsDir:     filepath.Join(home, "jars"),
+		githubToken: githubToken,
 	}
 }
 
@@ -191,7 +195,7 @@ func (i *Installer) Install(info *registry.PackageInfo) error {
 	defer os.Remove(tmpName)
 
 	// Download and verify in one streaming pass.
-	if err := downloadAndVerify(info.DownloadURL, info.Checksum, info.Name, tmp); err != nil {
+	if err := downloadAndVerify(info.DownloadURL, info.Checksum, info.Name, tmp, i.githubToken); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -227,7 +231,7 @@ func (i *Installer) InstallJar(dep manifest.JavaDependency) error {
 	fmt.Printf("    Downloading %s\n", url)
 
 	// JavaDependency doesn't carry a checksum field today; pass "" to skip.
-	if err := downloadAndVerify(url, dep.Checksum, dep.JarFileName(), f); err != nil {
+	if err := downloadAndVerify(url, dep.Checksum, dep.JarFileName(), f, ""); err != nil {
 		f.Close()
 		os.Remove(dest)
 		return err
@@ -278,14 +282,27 @@ func (i *Installer) JarsDir() string { return i.jarsDir }
 
 // downloadAndVerify fetches url, streams the body through a DigestingReader
 // into w, and verifies the SHA256 against expectedChecksum in a single pass.
-// name is used only in error messages.
-func downloadAndVerify(url, expectedChecksum, name string, w io.Writer) error {
-	resp, err := http.Get(url)
+// name is used only in error messages. If authToken is non-empty and the URL
+// points to the GitHub API, authentication headers are added for private repos.
+func downloadAndVerify(url, expectedChecksum, name string, w io.Writer, authToken string) error {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("download failed for %s: %w", name, err)
+	}
+	if authToken != "" && gh.IsGitHubURL(url) {
+		req.Header.Set("Authorization", "token "+authToken)
+		req.Header.Set("Accept", "application/octet-stream")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("download failed for %s: %w", name, err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("HTTP 401 downloading %s: GitHub token may be missing or expired — run 'fglpkg login' or set FGLPKG_GITHUB_TOKEN", name)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d downloading %s from %s", resp.StatusCode, name, url)
 	}

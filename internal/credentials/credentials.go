@@ -30,9 +30,10 @@ const filename = "credentials.json"
 
 // Entry holds the stored credential for one registry.
 type Entry struct {
-	Token    string `json:"token"`
-	Username string `json:"username,omitempty"`
-	SavedAt  string `json:"savedAt"`
+	Token       string `json:"token"`
+	Username    string `json:"username,omitempty"`
+	GitHubToken string `json:"githubToken,omitempty"`
+	SavedAt     string `json:"savedAt"`
 }
 
 // File is the top-level credentials file structure.
@@ -112,6 +113,36 @@ func TokenFor(home, registryURL string) string {
 		return ""
 	}
 	return e.Token
+}
+
+// SetGitHubToken stores a GitHub token for the given registry URL, preserving
+// any existing registry token and username on that entry.
+func (f *File) SetGitHubToken(registryURL, githubToken string) {
+	key := normalise(registryURL)
+	e := f.Registries[key]
+	e.GitHubToken = githubToken
+	if e.SavedAt == "" {
+		e.SavedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	f.Registries[key] = e
+}
+
+// GitHubTokenFor returns the GitHub token to use for package downloads.
+// It checks the FGLPKG_GITHUB_TOKEN env var first, then falls back to the
+// stored credential for the default registry.
+func GitHubTokenFor(home, registryURL string) string {
+	if t := os.Getenv("FGLPKG_GITHUB_TOKEN"); t != "" {
+		return t
+	}
+	f, err := Load(home)
+	if err != nil {
+		return ""
+	}
+	e, ok := f.Get(registryURL)
+	if !ok {
+		return ""
+	}
+	return e.GitHubToken
 }
 
 // normalise lowercases and strips a trailing slash from a registry URL so

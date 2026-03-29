@@ -159,6 +159,8 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 | `FGLPKG_HOME` | Override default `~/.fglpkg` home |
 | `FGLPKG_REGISTRY` | Override default registry URL |
 | `FGLPKG_PUBLISH_TOKEN` | Admin/publish token (bypasses credentials file) |
+| `FGLPKG_GITHUB_TOKEN` | GitHub PAT for package uploads/downloads (private repo) |
+| `FGLPKG_GITHUB_REPO` | GitHub `owner/repo` for package storage (e.g., `4js-mikefolcher/fglpkg-packages`) |
 | `FGLPKG_GENERO_VERSION` | Override Genero version detection |
 | `FGLLDPATH` | Auto-managed by `fglpkg env` (prepends, preserves existing value) |
 | `CLASSPATH` | Auto-managed by `fglpkg env` (prepends, preserves existing value) |
@@ -176,6 +178,7 @@ fglpkg list                   # List installed packages
 fglpkg env                    # Print export statements
 fglpkg search json            # Search registry
 fglpkg publish                # Publish current package to registry
+fglpkg unpublish pkg@1.0.0    # Remove a published version
 fglpkg login                  # Save registry credentials
 fglpkg logout                 # Remove saved credentials
 fglpkg whoami                 # Show current authenticated user
@@ -211,17 +214,33 @@ export FGLPKG_REGISTRY=https://registry.example.com
 | `GET` | `/packages/:name/:version` | Full package metadata |
 | `GET` | `/packages/:name/:version/download` | Download the zip |
 | `POST` | `/packages/:name/:version/publish` | Publish a new version (auth required) |
+| `DELETE` | `/packages/:name/:version/unpublish` | Remove a published version (auth required) |
 | `GET` | `/search?q=<term>` | Search by name or description |
 | `GET` | `/health` | Liveness probe |
 
 ### Publishing a Package
 
+Package zips are stored as GitHub Release assets on a private repository. The registry server on Fly.io stores only metadata (no zip files).
+
 ```bash
+# Set the GitHub packages repository
+export FGLPKG_GITHUB_REPO=4js-mikefolcher/fglpkg-packages
+
+# Log in (prompts for both registry token and GitHub token)
 fglpkg login
+
+# Publish
 fglpkg publish
 ```
 
-`fglpkg publish` walks the directory specified by `root` (or `.` if omitted), collects files matching the `files` patterns (default: `*.42m`, `*.42f`, `*.sch`), preserves the full directory structure in the zip, computes the SHA256 checksum, and POSTs a multipart request to the registry.
+The publish flow:
+1. Builds a zip from the directory specified by `root` (or `.`), collecting files matching `files` patterns (default: `*.42m`, `*.42f`, `*.sch`)
+2. Uploads the zip as a GitHub Release asset to the private packages repo
+3. Registers metadata (description, checksum, download URL, dependencies) with the registry
+
+**GitHub token requirements:**
+- Publishers need a fine-grained PAT with **Contents: Read and write** on the packages repo
+- Consumers (installers) need a fine-grained PAT with **Contents: Read** on the packages repo
 
 ### Registry Storage Layout
 
