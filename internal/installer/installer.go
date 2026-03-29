@@ -327,16 +327,6 @@ func extractZip(zipPath, destDir string) error {
 			return fmt.Errorf("unsafe path in zip: %s", f.Name)
 		}
 
-		// Strip the top-level wrapper directory many zip tools add.
-		// e.g. "mypackage-1.0.0/foo.42m" → "foo.42m"
-		parts := strings.SplitN(cleanName, string(filepath.Separator), 2)
-		if len(parts) == 2 {
-			cleanName = parts[1]
-		}
-		if cleanName == "" {
-			continue
-		}
-
 		target := filepath.Join(destDir, cleanName)
 
 		if f.FileInfo().IsDir() {

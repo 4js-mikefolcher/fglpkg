@@ -23,6 +23,12 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/workspace"
 )
 
+// Version and Build are set at compile time via -ldflags.
+var (
+	Version = "dev"
+	Build   = "unknown"
+)
+
 // reader is a package-level buffered stdin reader shared across all prompts
 // so buffered input is never lost between successive promptWithDefault calls.
 var reader = bufio.NewReader(os.Stdin)
@@ -67,7 +73,7 @@ func Execute() error {
 	case "workspace", "ws":
 		return cmdWorkspace(args)
 	case "version":
-		fmt.Println("fglpkg version 0.1.0")
+		fmt.Printf("fglpkg version %s (build %s)\n", Version, Build)
 		return nil
 	case "help", "--help", "-h":
 		printUsage()
@@ -212,20 +218,6 @@ func cmdEnv(_ []string) error {
 		return err
 	}
 	for _, line := range exports {
-		// Re-emit each export with proper shell quoting so paths containing
-		// spaces work correctly with eval "$(fglpkg env)".
-		if strings.HasPrefix(line, "export ") {
-			rest := strings.TrimPrefix(line, "export ")
-			idx := strings.IndexByte(rest, '=')
-			if idx > 0 {
-				key := rest[:idx]
-				value := rest[idx+1:]
-				// Strip any existing quotes the generator may have added.
-				value = strings.Trim(value, "'\"")
-				fmt.Println(quotedExportLine(key, value))
-				continue
-			}
-		}
 		fmt.Println(line)
 	}
 	return nil
@@ -340,35 +332,74 @@ func buildPackageZip(m *manifest.Manifest) ([]byte, string, error) {
 	h := sha256.New()
 	zw := zip.NewWriter(io.MultiWriter(&buf, h))
 
+	// Determine the root directory for package files.
+	root := m.Root
+	if root == "" {
+		root = "."
+	}
+
 	// Use manifest's files list if specified, otherwise use defaults.
 	patterns := m.Files
 	if len(patterns) == 0 {
 		patterns = []string{"*.42m", "*.42f", "*.sch"}
 	}
-	// Always include the manifest itself.
-	patterns = append(patterns, manifest.Filename)
 
-	for _, pattern := range patterns {
-		matches, _ := filepath.Glob(pattern)
-		for _, match := range matches {
-			if err := addFileToZip(zw, match); err != nil {
-				return nil, "", fmt.Errorf("cannot add %s to zip: %w", match, err)
+	// Walk the root directory tree and collect files matching the patterns.
+	added := make(map[string]bool)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		base := filepath.Base(path)
+		for _, pattern := range patterns {
+			matched, _ := filepath.Match(pattern, base)
+			if matched && !added[path] {
+				added[path] = true
+				// Keep the path relative to the project directory (not
+				// root) so the full directory structure is preserved in
+				// the zip.  When extracted into ~/.fglpkg/packages/<name>/,
+				// files like com/fourjs/poiapi/Module.42m stay intact.
+				relPath, relErr := filepath.Rel(".", path)
+				if relErr != nil {
+					relPath = path
+				}
+				if err := addFileToZip(zw, path, relPath); err != nil {
+					return fmt.Errorf("cannot add %s to zip: %w", path, err)
+				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("error walking root %q: %w", root, err)
 	}
+
+	// Always include the manifest from the current directory.
+	if !added[manifest.Filename] {
+		if err := addFileToZip(zw, manifest.Filename, manifest.Filename); err != nil {
+			return nil, "", fmt.Errorf("cannot add %s to zip: %w", manifest.Filename, err)
+		}
+	}
+
 	if err := zw.Close(); err != nil {
 		return nil, "", err
 	}
 	return buf.Bytes(), hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func addFileToZip(zw *zip.Writer, path string) error {
-	f, err := os.Open(path)
+// addFileToZip adds a file at diskPath into the zip using zipPath as
+// its name, preserving directory structure.
+func addFileToZip(zw *zip.Writer, diskPath, zipPath string) error {
+	f, err := os.Open(diskPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	fw, err := zw.Create(filepath.Base(path))
+	// Always use forward slashes in zip entries for portability.
+	fw, err := zw.Create(filepath.ToSlash(zipPath))
 	if err != nil {
 		return err
 	}
@@ -829,14 +860,6 @@ func filepathBase() string {
 		}
 	}
 	return dir
-}
-
-// quotedExportLine wraps a shell export value in single quotes so that paths
-// containing spaces work correctly with eval "$(fglpkg env)".
-func quotedExportLine(key, value string) string {
-	// Escape any literal single quotes inside the value using the '\\'' idiom.
-	escaped := strings.ReplaceAll(value, "'", "'\\''")
-	return fmt.Sprintf("export %s='%s'", key, escaped)
 }
 
 // promptWithDefault prints a prompt and reads a full line from stdin,

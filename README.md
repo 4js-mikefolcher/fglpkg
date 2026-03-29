@@ -111,7 +111,7 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 | `FGLPKG_HOME` | Override default `~/.fglpkg` home |
 | `FGLPKG_REGISTRY` | Override default registry URL |
 | `FGLLDPATH` | Auto-managed by `fglpkg env` |
-| `FGLJAVAPROPERTY_java.class.path` | Auto-managed by `fglpkg env` |
+| `CLASSPATH` | Auto-managed by `fglpkg env` |
 
 ## Usage
 

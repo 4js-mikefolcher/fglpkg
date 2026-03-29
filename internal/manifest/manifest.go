@@ -26,6 +26,7 @@ type Manifest struct {
 	// Omit or set to "*" to indicate compatibility with any version.
 	GeneroConstraint string            `json:"genero,omitempty"`
 	Dependencies     Dependencies      `json:"dependencies"`
+	Root             string            `json:"root,omitempty"`  // base directory for package files (default ".")
 	Files            []string          `json:"files,omitempty"` // glob patterns for package zip
 	Scripts          map[string]string `json:"scripts,omitempty"`
 }
