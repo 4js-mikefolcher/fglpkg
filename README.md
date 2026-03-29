@@ -8,7 +8,8 @@ A package manager for Genero BDL projects, supporting both BDL packages and Java
 fglpkg/
 ├── cmd/
 │   ├── fglpkg/main.go              # Package manager CLI entry point
-│   └── registry/main.go            # Registry server entry point
+│   ├── registry/main.go            # Registry server entry point
+│   └── build.sh                    # Cross-platform build script
 ├── internal/
 │   ├── cli/cli.go                  # Command dispatch & user interaction
 │   ├── manifest/manifest.go        # fglpkg.json parsing & manipulation
@@ -18,35 +19,26 @@ fglpkg/
 │   ├── installer/installer.go      # Zip download, extraction, JAR management
 │   ├── lockfile/lockfile.go        # fglpkg.lock read/write/validate
 │   ├── checksum/checksum.go        # SHA256 streaming verification
+│   ├── credentials/                # Registry auth credential storage
 │   ├── workspace/workspace.go      # Monorepo workspace support
 │   ├── registry/registry.go        # Registry HTTP client
 │   └── registry/server/            # Registry HTTP server
 │       ├── server.go               # Route handlers
 │       ├── store.go                # Flat-file storage backend
 │       └── testing.go              # Test helper (NewTestServer)
+├── .github/workflows/release.yml   # Automated release on tag push
 ├── go.mod
 └── README.md
 ```
 
-## Building
-
-```bash
-go build -o fglpkg ./cmd/fglpkg
-```
-
-Cross-compile for other platforms:
-
-```bash
-GOOS=windows GOARCH=amd64 go build -o fglpkg.exe ./cmd/fglpkg
-GOOS=darwin  GOARCH=arm64 go build -o fglpkg-mac  ./cmd/fglpkg
-```
-
 ## Installation
 
-Copy the binary to a directory in your `PATH`:
+Download the latest binary for your platform from [GitHub Releases](https://github.com/4js-mikefolcher/fglpkg/releases) and place it in your `PATH`:
 
 ```bash
-sudo cp fglpkg /usr/local/bin/
+# Example for macOS Apple Silicon
+sudo cp fglpkg-darwin-arm64 /usr/local/bin/fglpkg
+sudo chmod +x /usr/local/bin/fglpkg
 ```
 
 Add environment setup to your shell profile:
@@ -55,6 +47,20 @@ Add environment setup to your shell profile:
 echo 'eval "$(fglpkg env)"' >> ~/.bashrc
 source ~/.bashrc
 ```
+
+## Building from Source
+
+```bash
+go build -o fglpkg ./cmd/fglpkg
+```
+
+Use the build script to cross-compile for all platforms with embedded version info:
+
+```bash
+FGLPKG_VERSION=1.0.0 ./cmd/build.sh
+```
+
+This produces ARM and Intel binaries for Linux, macOS, and Windows in the `./bin/` directory.
 
 ## Home Directory Layout
 
@@ -67,14 +73,19 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 │   │   ├── fglpkg.json
 │   │   ├── strings.42m
 │   │   └── dates.42m
-│   └── dbtools/
-│       └── ...
-└── jars/              # Java JARs
-    ├── gson-2.10.1.jar
-    └── commons-lang3-3.12.0.jar
+│   └── poiapi/
+│       └── com/fourjs/poiapi/
+│           ├── fglpkg.json
+│           └── PoiApi.42m
+├── jars/              # Java JARs
+│   ├── gson-2.10.1.jar
+│   └── commons-lang3-3.12.0.jar
+└── credentials.json   # Registry auth tokens
 ```
 
 ## fglpkg.json Format
+
+### For a project (consuming packages)
 
 ```json
 {
@@ -93,16 +104,53 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
         "groupId": "com.google.code.gson",
         "artifactId": "gson",
         "version": "2.10.1"
-      },
-      {
-        "groupId": "org.apache.commons",
-        "artifactId": "commons-lang3",
-        "version": "3.12.0"
       }
     ]
   }
 }
 ```
+
+### For a package (publishing to registry)
+
+```json
+{
+  "name": "poiapi",
+  "version": "1.0.0",
+  "description": "POI API for Genero BDL",
+  "author": "Jane Developer",
+  "license": "MIT",
+  "root": "com/fourjs/poiapi",
+  "genero": "^4.0.0",
+  "main": "PoiApi.42m",
+  "dependencies": {
+    "java": [
+      {
+        "groupId": "org.apache.poi",
+        "artifactId": "poi",
+        "version": "5.2.3"
+      }
+    ]
+  }
+}
+```
+
+### Manifest Fields
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | Yes | Package name (used as the registry identifier) |
+| `version` | Yes | Semver version string |
+| `description` | No | Short description |
+| `author` | No | Author name |
+| `license` | No | License identifier (e.g., `MIT`, `Apache-2.0`) |
+| `repository` | No | Source repository URL |
+| `main` | No | Primary `.42m` entry point |
+| `genero` | No | Genero BDL version constraint (e.g., `^4.0.0`) |
+| `root` | No | Base directory for package files when publishing (default `.`) |
+| `files` | No | Glob patterns for files to include in the zip (default `["*.42m", "*.42f", "*.sch"]`) |
+| `dependencies.fgl` | No | BDL package dependencies (`name` -> `version constraint`) |
+| `dependencies.java` | No | Java JAR dependencies (Maven coordinates) |
+| `scripts` | No | Custom script definitions |
 
 ## Environment Variables
 
@@ -110,8 +158,10 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 |---|---|
 | `FGLPKG_HOME` | Override default `~/.fglpkg` home |
 | `FGLPKG_REGISTRY` | Override default registry URL |
-| `FGLLDPATH` | Auto-managed by `fglpkg env` |
-| `CLASSPATH` | Auto-managed by `fglpkg env` |
+| `FGLPKG_PUBLISH_TOKEN` | Admin/publish token (bypasses credentials file) |
+| `FGLPKG_GENERO_VERSION` | Override Genero version detection |
+| `FGLLDPATH` | Auto-managed by `fglpkg env` (prepends, preserves existing value) |
+| `CLASSPATH` | Auto-managed by `fglpkg env` (prepends, preserves existing value) |
 
 ## Usage
 
@@ -121,9 +171,19 @@ fglpkg install                # Install all deps from fglpkg.json
 fglpkg install myutils        # Add + install latest version
 fglpkg install myutils@1.2.0  # Add + install specific version
 fglpkg remove myutils         # Remove a package
+fglpkg update                 # Re-resolve and update all dependencies
 fglpkg list                   # List installed packages
 fglpkg env                    # Print export statements
 fglpkg search json            # Search registry
+fglpkg publish                # Publish current package to registry
+fglpkg login                  # Save registry credentials
+fglpkg logout                 # Remove saved credentials
+fglpkg whoami                 # Show current authenticated user
+fglpkg owner list <pkg>       # List package owners
+fglpkg owner add <pkg> <user> # Add a package owner
+fglpkg workspace init         # Initialise a monorepo workspace
+fglpkg version                # Print version and build info
+fglpkg help                   # Show help
 ```
 
 ## Running the Registry Server
@@ -157,14 +217,11 @@ export FGLPKG_REGISTRY=https://registry.example.com
 ### Publishing a Package
 
 ```bash
-export FGLPKG_PUBLISH_TOKEN=my-secret-token
-export FGLPKG_REGISTRY=https://registry.example.com
+fglpkg login
 fglpkg publish
 ```
 
-`fglpkg publish` zips all `*.42m`, `*.42f`, `*.sch`, and `fglpkg.json` files
-in the current directory, computes the SHA256 checksum, and POSTs a multipart
-request to the registry.
+`fglpkg publish` walks the directory specified by `root` (or `.` if omitted), collects files matching the `files` patterns (default: `*.42m`, `*.42f`, `*.sch`), preserves the full directory structure in the zip, computes the SHA256 checksum, and POSTs a multipart request to the registry.
 
 ### Registry Storage Layout
 
@@ -178,11 +235,13 @@ request to the registry.
         └── 1.1.0.zip
 ```
 
-- [ ] Semver constraint resolution (`^1.0.0`, `~2.1`, `>=1.0 <2.0`)
-- [ ] Dependency graph / transitive dependency resolution
-- [ ] SHA256 checksum verification after download
-- [ ] `fglpkg publish` command to publish packages to the registry
-- [ ] `fglpkg update` to upgrade to latest compatible versions
-- [ ] Lock file (`fglpkg.lock`) for reproducible installs
-- [ ] Registry server implementation
-- [ ] Workspace support (monorepos)
+## Releases
+
+Releases are automated via GitHub Actions. Push a tag to create a release with binaries for all platforms:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Pre-built binaries are available at [GitHub Releases](https://github.com/4js-mikefolcher/fglpkg/releases).
