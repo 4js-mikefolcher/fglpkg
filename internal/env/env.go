@@ -56,7 +56,8 @@ func (g *Generator) Generate() ([]string, error) {
 // buildFGLLDPATH returns the fglpkg-managed FGLLDPATH entries.
 // Order of precedence (highest first):
 //  1. Workspace member source directories (local dev, no install needed)
-//  2. Each installed package directory
+//  2. Local project packages (.fglpkg/packages/ in cwd)
+//  3. Global installed packages (~/.fglpkg/packages/)
 //
 // The existing FGLLDPATH value is preserved at eval time via
 // prependExportLine, so we do not read it here.
@@ -72,6 +73,16 @@ func (g *Generator) buildFGLLDPATH() (string, error) {
 		}
 	}
 
+	addPackagesFrom := func(dir string) {
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					add(filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+	}
+
 	// 1. Workspace member paths (if we're inside a workspace).
 	if wsRoot := workspace.FindRoot("."); wsRoot != "" {
 		ws, err := workspace.Load(wsRoot)
@@ -82,44 +93,55 @@ func (g *Generator) buildFGLLDPATH() (string, error) {
 		}
 	}
 
-	// 2. Each installed package directory (so Genero can resolve paths like
-	// com/fourjs/poiapi/Module.42m relative to the package root).
-	if entries, err := os.ReadDir(g.packagesDir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				add(filepath.Join(g.packagesDir, e.Name()))
-			}
+	// 2. Local project packages (higher priority than global).
+	localPkgs := filepath.Join(".", ".fglpkg", "packages")
+	if abs, err := filepath.Abs(localPkgs); err == nil {
+		if abs != g.packagesDir { // avoid duplicating if local == global
+			addPackagesFrom(abs)
 		}
 	}
+
+	// 3. Global installed packages.
+	addPackagesFrom(g.packagesDir)
 
 	return strings.Join(parts, sep), nil
 }
 
 // buildJavaClasspath returns the fglpkg-managed CLASSPATH entries by
-// scanning the jars directory for all .jar files.  The existing
-// CLASSPATH value is preserved at eval time via prependExportLine.
+// scanning the jars directory for all .jar files.  Local project jars
+// (.fglpkg/jars/) are included with higher priority than global jars.
+// The existing CLASSPATH value is preserved at eval time via prependExportLine.
 func (g *Generator) buildJavaClasspath() (string, error) {
-	entries, err := os.ReadDir(g.jarsDir)
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("cannot read jars directory: %w", err)
-	}
-
 	sep := pathSeparator()
 	seen := make(map[string]bool)
 	var jars []string
 
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jar") {
-			p := filepath.Join(g.jarsDir, e.Name())
-			if !seen[p] {
-				jars = append(jars, p)
-				seen[p] = true
+	addJarsFrom := func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".jar") {
+				p := filepath.Join(dir, e.Name())
+				if !seen[p] {
+					jars = append(jars, p)
+					seen[p] = true
+				}
 			}
 		}
 	}
+
+	// Local project jars (higher priority).
+	localJars := filepath.Join(".", ".fglpkg", "jars")
+	if abs, err := filepath.Abs(localJars); err == nil {
+		if abs != g.jarsDir {
+			addJarsFrom(abs)
+		}
+	}
+
+	// Global jars.
+	addJarsFrom(g.jarsDir)
 
 	return strings.Join(jars, sep), nil
 }

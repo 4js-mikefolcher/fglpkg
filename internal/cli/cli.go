@@ -108,14 +108,28 @@ func cmdInit(_ []string) error {
 // ─── install ──────────────────────────────────────────────────────────────────
 
 func cmdInstall(args []string) error {
-	home, err := fglpkgHome()
+	local := false
+	var pkgArgs []string
+	for _, a := range args {
+		if a == "--local" || a == "-l" {
+			local = true
+		} else {
+			pkgArgs = append(pkgArgs, a)
+		}
+	}
+
+	home, err := installHome(local)
 	if err != nil {
 		return err
 	}
 	inst := newInstaller(home)
 	projectDir, _ := os.Getwd()
 
-	if len(args) == 0 {
+	if local {
+		fmt.Println("Installing to local project directory (.fglpkg/)")
+	}
+
+	if len(pkgArgs) == 0 {
 		m, err := manifest.Load(".")
 		if err != nil {
 			return fmt.Errorf("failed to load %s: %w\nRun 'fglpkg init' first", manifest.Filename, err)
@@ -127,7 +141,7 @@ func cmdInstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, pkg := range args {
+	for _, pkg := range pkgArgs {
 		name, version, err := parsePackageArg(pkg)
 		if err != nil {
 			return err
@@ -145,6 +159,20 @@ func cmdInstall(args []string) error {
 	}
 	fmt.Println()
 	return inst.InstallAll(m, projectDir, true)
+}
+
+// installHome returns the fglpkg home directory for installs. When local is
+// true, it returns .fglpkg/ in the current working directory instead of the
+// global ~/.fglpkg/.
+func installHome(local bool) (string, error) {
+	if local {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine working directory: %w", err)
+		}
+		return filepath.Join(wd, ".fglpkg"), nil
+	}
+	return fglpkgHome()
 }
 
 // ─── remove ───────────────────────────────────────────────────────────────────
@@ -1012,7 +1040,7 @@ USAGE:
 
 COMMANDS:
   init              Create a new fglpkg.json
-  install           Install all dependencies (or add a specific package)
+  install [--local] Install all dependencies (or add a specific package)
   remove <pkg>      Remove a package
   update            Re-resolve and update all dependencies
   list              List installed packages
