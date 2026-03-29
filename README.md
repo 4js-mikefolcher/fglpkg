@@ -182,6 +182,9 @@ fglpkg unpublish pkg@1.0.0    # Remove a published version
 fglpkg login                  # Save registry credentials
 fglpkg logout                 # Remove saved credentials
 fglpkg whoami                 # Show current authenticated user
+fglpkg config github-repos list          # List configured GitHub repos
+fglpkg config github-repos add o/r       # Add a GitHub package repo (admin)
+fglpkg config github-repos remove o/r    # Remove a GitHub package repo (admin)
 fglpkg owner list <pkg>       # List package owners
 fglpkg owner add <pkg> <user> # Add a package owner
 fglpkg workspace init         # Initialise a monorepo workspace
@@ -215,6 +218,9 @@ export FGLPKG_REGISTRY=https://registry.example.com
 | `GET` | `/packages/:name/:version/download` | Download the zip |
 | `POST` | `/packages/:name/:version/publish` | Publish a new version (auth required) |
 | `DELETE` | `/packages/:name/:version/unpublish` | Remove a published version (auth required) |
+| `GET` | `/config` | Registry configuration (GitHub repos) |
+| `POST` | `/config/github-repos` | Add a GitHub repo (admin only) |
+| `DELETE` | `/config/github-repos/:owner/:repo` | Remove a GitHub repo (admin only) |
 | `GET` | `/search?q=<term>` | Search by name or description |
 | `GET` | `/health` | Liveness probe |
 
@@ -222,16 +228,23 @@ export FGLPKG_REGISTRY=https://registry.example.com
 
 Package zips are stored as GitHub Release assets on a private repository. The registry server on Fly.io stores only metadata (no zip files).
 
-```bash
-# Set the GitHub packages repository
-export FGLPKG_GITHUB_REPO=4js-mikefolcher/fglpkg-packages
+First, an admin configures the GitHub repo on the registry (one-time setup):
 
+```bash
+fglpkg config github-repos add 4js-mikefolcher/fglpkg-packages
+```
+
+Then any authenticated user can publish:
+
+```bash
 # Log in (prompts for both registry token and GitHub token)
 fglpkg login
 
 # Publish
 fglpkg publish
 ```
+
+The CLI automatically fetches the GitHub repo from the registry config. You can override it with `FGLPKG_GITHUB_REPO` if needed.
 
 The publish flow:
 1. Builds a zip from the directory specified by `root` (or `.`), collecting files matching `files` patterns (default: `*.42m`, `*.42f`, `*.sch`)

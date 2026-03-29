@@ -72,6 +72,8 @@ func Execute() error {
 		return cmdOwner(args)
 	case "token":
 		return cmdToken(args)
+	case "config":
+		return cmdConfig(args)
 	case "workspace", "ws":
 		return cmdWorkspace(args)
 	case "version":
@@ -271,7 +273,7 @@ func cmdPublish(_ []string) error {
 	if githubToken == "" {
 		return fmt.Errorf("GitHub token required for publishing\nSet FGLPKG_GITHUB_TOKEN or run 'fglpkg login'")
 	}
-	owner, repo, err := gh.RepoFromEnv()
+	owner, repo, err := resolveGitHubRepo()
 	if err != nil {
 		return err
 	}
@@ -458,7 +460,7 @@ func cmdUnpublish(args []string) error {
 	// 1. Delete the GitHub Release (and its asset).
 	githubToken := credentials.GitHubTokenFor(home, registryURL)
 	if githubToken != "" {
-		owner, repo, err := gh.RepoFromEnv()
+		owner, repo, err := resolveGitHubRepo()
 		if err == nil {
 			tag := gh.ReleaseTag(name, version)
 			fmt.Printf("  Deleting GitHub release %s...\n", tag)
@@ -755,6 +757,116 @@ func cmdToken(args []string) error {
 	return nil
 }
 
+// ─── config ───────────────────────────────────────────────────────────────────
+
+func cmdConfig(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: fglpkg config <github-repos> <list|add|remove> [owner/repo]")
+	}
+	switch args[0] {
+	case "github-repos":
+		return cmdConfigGitHubRepos(args[1:])
+	default:
+		return fmt.Errorf("unknown config subcommand %q", args[0])
+	}
+}
+
+func cmdConfigGitHubRepos(args []string) error {
+	if len(args) == 0 {
+		return cmdConfigGitHubReposList()
+	}
+	switch args[0] {
+	case "list":
+		return cmdConfigGitHubReposList()
+	case "add":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: fglpkg config github-repos add <owner/repo>")
+		}
+		return cmdConfigGitHubReposAdd(args[1])
+	case "remove":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: fglpkg config github-repos remove <owner/repo>")
+		}
+		return cmdConfigGitHubReposRemove(args[1])
+	default:
+		return fmt.Errorf("unknown github-repos subcommand %q", args[0])
+	}
+}
+
+func cmdConfigGitHubReposList() error {
+	cfg, err := registry.FetchConfig()
+	if err != nil {
+		return err
+	}
+	if len(cfg.GitHubRepos) == 0 {
+		fmt.Println("No GitHub repos configured.")
+		return nil
+	}
+	fmt.Println("GitHub package repos:")
+	for _, r := range cfg.GitHubRepos {
+		fmt.Printf("  %s/%s\n", r.Owner, r.Repo)
+	}
+	return nil
+}
+
+func cmdConfigGitHubReposAdd(ownerRepo string) error {
+	owner, repo, err := parseOwnerRepo(ownerRepo)
+	if err != nil {
+		return err
+	}
+	home, _ := fglpkgHome()
+	reg := defaultRegistry()
+	token := credentials.TokenFor(home, reg)
+	if token == "" {
+		return fmt.Errorf("not logged in — run 'fglpkg login'")
+	}
+	body := fmt.Sprintf(`{"owner":%q,"repo":%q}`, owner, repo)
+	resp, err := authPost(reg+"/config/github-repos", token, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return registryError(resp)
+	}
+	fmt.Printf("✓ Added GitHub repo %s/%s\n", owner, repo)
+	return nil
+}
+
+func cmdConfigGitHubReposRemove(ownerRepo string) error {
+	owner, repo, err := parseOwnerRepo(ownerRepo)
+	if err != nil {
+		return err
+	}
+	home, _ := fglpkgHome()
+	reg := defaultRegistry()
+	token := credentials.TokenFor(home, reg)
+	if token == "" {
+		return fmt.Errorf("not logged in — run 'fglpkg login'")
+	}
+	url := fmt.Sprintf("%s/config/github-repos/%s/%s", reg, owner, repo)
+	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return registryError(resp)
+	}
+	fmt.Printf("✓ Removed GitHub repo %s/%s\n", owner, repo)
+	return nil
+}
+
+func parseOwnerRepo(s string) (owner, repo string, err error) {
+	parts := strings.SplitN(s, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("expected owner/repo format, got %q", s)
+	}
+	return parts[0], parts[1], nil
+}
+
 // ─── workspace ────────────────────────────────────────────────────────────────
 
 func cmdWorkspace(args []string) error {
@@ -913,6 +1025,7 @@ COMMANDS:
   whoami            Show current authenticated user
   owner             Manage package ownership
   token             Manage user tokens (admin)
+  config            Manage registry configuration (GitHub repos)
   workspace         Manage monorepo workspaces
   version           Print fglpkg version
   help              Show this help
@@ -940,6 +1053,27 @@ func fglpkgHome() (string, error) {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 	return home + "/.fglpkg", nil
+}
+
+// resolveGitHubRepo returns the GitHub owner/repo for package storage.
+// Precedence: FGLPKG_GITHUB_REPO env var > registry config > error.
+func resolveGitHubRepo() (owner, repo string, err error) {
+	owner, repo, err = gh.RepoFromEnv()
+	if err != nil {
+		return "", "", err
+	}
+	if owner != "" {
+		return owner, repo, nil
+	}
+	// Fall back to the registry config.
+	cfg, err := registry.FetchConfig()
+	if err != nil {
+		return "", "", fmt.Errorf("cannot determine GitHub repo: FGLPKG_GITHUB_REPO is not set and registry config is unavailable: %w", err)
+	}
+	if len(cfg.GitHubRepos) == 0 {
+		return "", "", fmt.Errorf("no GitHub repos configured on the registry\nSet FGLPKG_GITHUB_REPO or ask an admin to run: fglpkg config github-repos add <owner/repo>")
+	}
+	return cfg.GitHubRepos[0].Owner, cfg.GitHubRepos[0].Repo, nil
 }
 
 func newInstaller(home string) *installer.Installer {

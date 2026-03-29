@@ -27,10 +27,12 @@ func AssetName(name, version string) string {
 }
 
 // RepoFromEnv reads FGLPKG_GITHUB_REPO and returns the owner and repo.
+// Returns empty strings and a nil error if the env var is not set, allowing
+// callers to fall back to the registry config.
 func RepoFromEnv() (owner, repo string, err error) {
 	val := os.Getenv("FGLPKG_GITHUB_REPO")
 	if val == "" {
-		return "", "", fmt.Errorf("FGLPKG_GITHUB_REPO is not set (e.g. 4js-mikefolcher/fglpkg-packages)")
+		return "", "", nil
 	}
 	parts := strings.SplitN(val, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

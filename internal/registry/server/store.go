@@ -302,6 +302,67 @@ func (s *fileStore) metaPath(name string) string {
 	return filepath.Join(s.dataDir, "packages", name, "meta.json")
 }
 
+// ─── Registry config ──────────────────────────────────────────────────────────
+
+// registryConfig stores server-side configuration such as GitHub package repos.
+type registryConfig struct {
+	GitHubRepos []gitHubRepo `json:"githubRepos"`
+}
+
+type gitHubRepo struct {
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+}
+
+func (s *fileStore) loadConfig() *registryConfig {
+	data, err := os.ReadFile(s.configPath())
+	if err != nil {
+		return &registryConfig{}
+	}
+	var cfg registryConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return &registryConfig{}
+	}
+	return &cfg
+}
+
+func (s *fileStore) saveConfig(cfg *registryConfig) error {
+	return atomicWriteJSON(s.configPath(), cfg)
+}
+
+func (s *fileStore) addGitHubRepo(owner, repo string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg := s.loadConfig()
+	for _, r := range cfg.GitHubRepos {
+		if r.Owner == owner && r.Repo == repo {
+			return nil // already exists
+		}
+	}
+	cfg.GitHubRepos = append(cfg.GitHubRepos, gitHubRepo{Owner: owner, Repo: repo})
+	return s.saveConfig(cfg)
+}
+
+func (s *fileStore) removeGitHubRepo(owner, repo string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg := s.loadConfig()
+	filtered := cfg.GitHubRepos[:0]
+	for _, r := range cfg.GitHubRepos {
+		if !(r.Owner == owner && r.Repo == repo) {
+			filtered = append(filtered, r)
+		}
+	}
+	cfg.GitHubRepos = filtered
+	return s.saveConfig(cfg)
+}
+
+func (s *fileStore) configPath() string {
+	return filepath.Join(s.dataDir, "config.json")
+}
+
 // ─── Atomic JSON write ────────────────────────────────────────────────────────
 
 func atomicWriteJSON(path string, v any) error {

@@ -265,16 +265,26 @@ By default, fglpkg collects files matching `*.42m`, `*.42f`, and `*.sch`. To cus
 
 Package zips are stored as GitHub Release assets on a private repository. The fglpkg registry server stores only metadata.
 
-**One-time setup:**
+**Admin one-time setup:**
 
 1. Create a private GitHub repository for package storage (e.g., `4js-mikefolcher/fglpkg-packages`)
-2. Create a GitHub Personal Access Token:
+2. Register the repo on the registry:
+   ```bash
+   fglpkg config github-repos add 4js-mikefolcher/fglpkg-packages
+   ```
+   This stores the repo in the registry config so all clients discover it automatically.
+
+**Per-developer setup:**
+
+3. Create a GitHub Personal Access Token (see [GitHub Token Setup](github-token-setup.md)):
    - **Publishers**: fine-grained token with **Contents: Read and write** on the packages repo
    - **Consumers**: fine-grained token with **Contents: Read** on the packages repo
-3. Set the packages repo:
+4. Log in to save both tokens:
    ```bash
-   export FGLPKG_GITHUB_REPO=4js-mikefolcher/fglpkg-packages
+   fglpkg login
    ```
+
+The `FGLPKG_GITHUB_REPO` environment variable can still be used to override the registry-configured repo (useful for CI or testing against a different repo).
 
 ### Publishing
 
@@ -286,12 +296,13 @@ fglpkg login
 
 This prompts for your registry token and GitHub token. Both are stored in `~/.fglpkg/credentials.json`.
 
-Set the target GitHub repo, then publish:
+Then publish:
 
 ```bash
-export FGLPKG_GITHUB_REPO=4js-mikefolcher/fglpkg-packages
 fglpkg publish
 ```
+
+The CLI fetches the GitHub repo from the registry config automatically.
 
 The publish flow:
 1. Builds a zip of your package files and computes the SHA256 checksum
@@ -394,9 +405,10 @@ For CI/CD environments, set tokens as environment variables instead of using `fg
 ```bash
 export FGLPKG_PUBLISH_TOKEN=my-secret-token
 export FGLPKG_GITHUB_TOKEN=ghp_xxxxxxxxxxxx
-export FGLPKG_GITHUB_REPO=4js-mikefolcher/fglpkg-packages
 fglpkg publish
 ```
+
+The GitHub repo is automatically fetched from the registry config. Override it with `FGLPKG_GITHUB_REPO` if needed.
 
 For install-only CI jobs, only the GitHub token is needed:
 

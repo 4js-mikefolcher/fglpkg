@@ -128,6 +128,32 @@ func Search(term string) ([]SearchResult, error) {
 	return results, nil
 }
 
+// RegistryConfig is the configuration returned by the registry server.
+type RegistryConfig struct {
+	GitHubRepos []GitHubRepo `json:"githubRepos"`
+}
+
+// GitHubRepo identifies a GitHub repository used for package storage.
+type GitHubRepo struct {
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+}
+
+// FetchConfig retrieves the registry configuration, including the list of
+// GitHub repos configured for package storage.
+func FetchConfig() (*RegistryConfig, error) {
+	base := registryBase()
+	data, err := httpGet(base + "/config")
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch registry config: %w", err)
+	}
+	var cfg RegistryConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("invalid registry config response: %w", err)
+	}
+	return &cfg, nil
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 func registryBase() string {

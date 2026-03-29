@@ -4,6 +4,9 @@
 //
 //	GET  /health                                liveness probe
 //	GET  /search?q=<term>                       search packages
+//	GET  /config                                registry configuration (GitHub repos)
+//	POST /config/github-repos                   add a GitHub repo (admin only)
+//	DELETE /config/github-repos/:owner/:repo    remove a GitHub repo (admin only)
 //
 //	GET  /packages/:name/versions               list versions + Genero constraints
 //	GET  /packages/:name/:version               full package metadata
@@ -102,6 +105,9 @@ func buildMux(h *handler) *http.ServeMux {
 	mux.HandleFunc("/auth/token", h.handleToken)
 	mux.HandleFunc("/auth/whoami", h.handleWhoami)
 	mux.HandleFunc("/auth/users", h.handleUsers)
+	mux.HandleFunc("/config/github-repos", h.handleConfigGitHubRepos)
+	mux.HandleFunc("/config/github-repos/", h.handleConfigGitHubRepos)
+	mux.HandleFunc("/config", h.handleConfig)
 	mux.HandleFunc("/packages/", h.handlePackages)
 	return mux
 }
@@ -687,6 +693,74 @@ func (h *handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, h.store.search(term))
+}
+
+// ─── GET /config ──────────────────────────────────────────────────────────────
+
+func (h *handler) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	if _, ok := h.optionalAuth(w, r); !ok {
+		return
+	}
+	cfg := h.store.loadConfig()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// ─── POST/DELETE /config/github-repos ─────────────────────────────────────────
+
+func (h *handler) handleConfigGitHubRepos(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		h.handleAddGitHubRepo(w, r)
+	case http.MethodDelete:
+		h.handleRemoveGitHubRepo(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "POST or DELETE only")
+	}
+}
+
+func (h *handler) handleAddGitHubRepo(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	var req struct {
+		Owner string `json:"owner"`
+		Repo  string `json:"repo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Owner == "" || req.Repo == "" {
+		writeError(w, http.StatusBadRequest, "owner and repo are required")
+		return
+	}
+	if err := h.store.addGitHubRepo(req.Owner, req.Repo); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config")
+		return
+	}
+	log.Printf("added GitHub repo %s/%s", req.Owner, req.Repo)
+	cfg := h.store.loadConfig()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (h *handler) handleRemoveGitHubRepo(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	// Parse owner/repo from URL path: /config/github-repos/owner/repo
+	path := strings.TrimPrefix(r.URL.Path, "/config/github-repos/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeError(w, http.StatusBadRequest, "path must be /config/github-repos/:owner/:repo")
+		return
+	}
+	if err := h.store.removeGitHubRepo(parts[0], parts[1]); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config")
+		return
+	}
+	log.Printf("removed GitHub repo %s/%s", parts[0], parts[1])
+	cfg := h.store.loadConfig()
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 // ─── GET /health ──────────────────────────────────────────────────────────────
