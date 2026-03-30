@@ -20,10 +20,16 @@ func ReleaseTag(name, version string) string {
 	return name + "-v" + version
 }
 
-// AssetName returns the zip filename used for a release asset.
+// AssetName returns the zip filename used for a release asset (legacy, no variant).
 // Example: AssetName("poiapi", "1.0.0") → "poiapi-1.0.0.zip"
 func AssetName(name, version string) string {
 	return name + "-" + version + ".zip"
+}
+
+// VariantAssetName returns the zip filename for a Genero variant release asset.
+// Example: VariantAssetName("poiapi", "1.0.0", "4") → "poiapi-1.0.0-genero4.zip"
+func VariantAssetName(name, version, generoMajor string) string {
+	return name + "-" + version + "-genero" + generoMajor + ".zip"
 }
 
 // RepoFromEnv reads FGLPKG_GITHUB_REPO and returns the owner and repo.

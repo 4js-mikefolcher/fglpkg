@@ -37,7 +37,7 @@ func (db packageDB) versions(name string) ([]resolver.CandidateVersion, error) {
 	return out, nil
 }
 
-func (db packageDB) info(name, version string) (*registry.PackageInfo, error) {
+func (db packageDB) info(name, version, _ string) (*registry.PackageInfo, error) {
 	pkg, ok := db[name]
 	if !ok {
 		return nil, errors.New("package not found: " + name)

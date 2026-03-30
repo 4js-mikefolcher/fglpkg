@@ -319,6 +319,47 @@ fglpkg unpublish poiapi@1.0.0
 
 This deletes the GitHub Release (and its zip asset) and removes the version metadata from the registry. You must be an owner of the package.
 
+### Genero Version Variants
+
+Genero BDL compiled modules (`.42m` files) are not compatible across major versions — a module compiled with Genero 4.x cannot be loaded by the Genero 6.x runtime. fglpkg handles this with **platform variants**: each package version can have multiple builds, one per Genero major version.
+
+#### Publishing variants
+
+When you run `fglpkg publish`, it automatically detects your local Genero version and uploads the zip as a variant. For example, on a Genero 4.x machine:
+
+```
+$ fglpkg publish
+Publishing poiapi@1.0.0 (Genero 4 variant) to https://registry.fglpkg.dev...
+  Package zip: 4096 bytes (SHA256: abc123...)
+  Uploading to GitHub (4js-mikefolcher/fglpkg-packages)...
+  Uploaded: poiapi-1.0.0-genero4.zip
+✓ Published poiapi@1.0.0
+```
+
+To publish for another Genero version, run the same command on a machine with that version installed:
+
+```bash
+# On a Genero 6.x machine
+FGLPKG_GENERO_VERSION=6.0.0 fglpkg publish
+```
+
+Both variants are stored as separate assets under the same GitHub Release (`poiapi-v1.0.0`).
+
+#### Installing the correct variant
+
+When you run `fglpkg install`, the resolver automatically detects your local Genero version and selects the matching variant. If no variant exists for your Genero version, the install fails with an error listing the available variants.
+
+```
+$ fglpkg install
+Resolving dependency graph (Genero 4.01.12)...
+  → poiapi@1.0.0 (genero4 variant)
+✓ poiapi@1.0.0
+```
+
+#### Lock file and Genero changes
+
+The lock file records which Genero major version was used during resolution. If you switch to a different Genero major version, `fglpkg install` will automatically re-resolve to select the correct variants.
+
 ### Genero Version Constraints
 
 Use the `genero` field to declare which Genero BDL versions your package supports:

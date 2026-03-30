@@ -28,12 +28,21 @@ type PackageInfo struct {
 	GeneroConstraint string                    `json:"genero,omitempty"`
 	FGLDeps          map[string]string         `json:"fglDeps,omitempty"`
 	JavaDeps         []manifest.JavaDependency `json:"javaDeps,omitempty"`
+	Variants         []VariantInfo             `json:"variants,omitempty"`
+}
+
+// VariantInfo describes a Genero-major-version-specific build of a package.
+type VariantInfo struct {
+	GeneroMajor string `json:"generoMajor"`
+	DownloadURL string `json:"downloadUrl"`
+	Checksum    string `json:"checksum"`
 }
 
 // VersionEntry pairs a version string with its declared Genero compatibility.
 type VersionEntry struct {
-	Version          string `json:"version"`
-	GeneroConstraint string `json:"genero,omitempty"`
+	Version          string   `json:"version"`
+	GeneroConstraint string   `json:"genero,omitempty"`
+	Variants         []string `json:"variants,omitempty"` // available Genero major versions
 }
 
 // VersionList is the registry response listing all available versions of a package.
@@ -55,7 +64,9 @@ type SearchResult struct {
 
 // Resolve fetches the best matching version of a package for the given constraint.
 // constraint may be "latest", "*", or any semver constraint string (e.g. "^1.2.0").
-func Resolve(name, constraint string) (*PackageInfo, error) {
+// generoMajor is the Genero major version to select the correct variant; pass ""
+// for legacy packages without variants.
+func Resolve(name, constraint, generoMajor string) (*PackageInfo, error) {
 	vl, err := FetchVersionList(name)
 	if err != nil {
 		return nil, err
@@ -80,7 +91,7 @@ func Resolve(name, constraint string) (*PackageInfo, error) {
 		return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
 	}
 
-	return FetchInfo(name, best.String())
+	return FetchInfoForGenero(name, best.String(), generoMajor)
 }
 
 // FetchVersionList retrieves all published versions for a named package.
@@ -105,6 +116,27 @@ func FetchInfo(name, version string) (*PackageInfo, error) {
 	data, err := httpGet(u)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch package info for %s@%s: %w", name, version, err)
+	}
+	var info PackageInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil, fmt.Errorf("invalid package info response: %w", err)
+	}
+	return &info, nil
+}
+
+// FetchInfoForGenero retrieves package metadata with the variant matching the
+// given Genero major version selected. The server resolves the variant and
+// returns the matching downloadUrl/checksum. If generoMajor is empty, this
+// behaves identically to FetchInfo.
+func FetchInfoForGenero(name, version, generoMajor string) (*PackageInfo, error) {
+	base := registryBase()
+	u := fmt.Sprintf("%s/packages/%s/%s", base, url.PathEscape(name), url.PathEscape(version))
+	if generoMajor != "" {
+		u += "?genero=" + url.QueryEscape(generoMajor)
+	}
+	data, err := httpGet(u)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch package info for %s@%s (genero %s): %w", name, version, generoMajor, err)
 	}
 	var info PackageInfo
 	if err := json.Unmarshal(data, &info); err != nil {

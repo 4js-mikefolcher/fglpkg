@@ -329,8 +329,9 @@ func (h *handler) handleVersionList(w http.ResponseWriter, r *http.Request, name
 	}
 
 	type versionEntry struct {
-		Version          string `json:"version"`
-		GeneroConstraint string `json:"genero,omitempty"`
+		Version          string   `json:"version"`
+		GeneroConstraint string   `json:"genero,omitempty"`
+		Variants         []string `json:"variants,omitempty"`
 	}
 	type response struct {
 		Name           string         `json:"name"`
@@ -341,9 +342,14 @@ func (h *handler) handleVersionList(w http.ResponseWriter, r *http.Request, name
 	resp := response{Name: name}
 	for _, v := range pkg.Versions {
 		resp.Versions = append(resp.Versions, v.Version)
+		var variantKeys []string
+		for _, vt := range v.Variants {
+			variantKeys = append(variantKeys, vt.GeneroMajor)
+		}
 		resp.VersionEntries = append(resp.VersionEntries, versionEntry{
 			Version:          v.Version,
 			GeneroConstraint: v.GeneroConstraint,
+			Variants:         variantKeys,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -370,9 +376,29 @@ func (h *handler) handlePackageInfo(w http.ResponseWriter, r *http.Request, name
 		writeError(w, http.StatusNotFound, fmt.Sprintf("version %s not found", version))
 		return
 	}
-        if ver.DownloadURL == "" {
-                ver.DownloadURL = h.store.downloadURL(name, version)
-        }
+	if ver.DownloadURL == "" {
+		ver.DownloadURL = h.store.downloadURL(name, version)
+	}
+
+	// If a Genero major version is requested and variants exist, select
+	// the matching variant and override downloadUrl/checksum.
+	generoMajor := r.URL.Query().Get("genero")
+	if generoMajor != "" && len(ver.Variants) > 0 {
+		v := ver.findVariant(generoMajor)
+		if v == nil {
+			available := make([]string, 0, len(ver.Variants))
+			for _, vt := range ver.Variants {
+				available = append(available, vt.GeneroMajor)
+			}
+			writeError(w, http.StatusNotFound,
+				fmt.Sprintf("no variant for Genero %s; available: %s",
+					generoMajor, strings.Join(available, ", ")))
+			return
+		}
+		ver.DownloadURL = v.DownloadURL
+		ver.Checksum = v.Checksum
+	}
+
 	writeJSON(w, http.StatusOK, ver)
 }
 
@@ -426,6 +452,7 @@ type publishRequest struct {
 	JavaDeps         []javaDep         `json:"javaDeps,omitempty"`
 	Checksum         string            `json:"checksum"`
 	DownloadURL      string            `json:"downloadUrl,omitempty"`
+	GeneroMajor      string            `json:"generoMajor,omitempty"` // variant key, e.g. "4"
 }
 
 type javaDep struct {
@@ -463,19 +490,30 @@ func (h *handler) handlePublish(w http.ResponseWriter, r *http.Request, name, ve
 		return
 	}
 
-	// Reject re-publishing an existing version.
+	// Check Content-Type to determine the publish path early, since we need
+	// the generoMajor field to decide if this is a variant publish.
+	ct := r.Header.Get("Content-Type")
+	isJSON := strings.HasPrefix(ct, "application/json")
+
+	// Reject re-publishing an existing version, but allow adding new
+	// variants to an existing version.
 	if pkg, err := h.store.loadPackage(name); err == nil {
-		if pkg.findVersion(version) != nil {
-			writeError(w, http.StatusConflict,
-				fmt.Sprintf("version %s of %s already exists", version, name))
-			return
+		if vr := pkg.findVersion(version); vr != nil {
+			// For variant publishes, only reject if that specific variant exists.
+			// For non-variant publishes, reject any duplicate.
+			if isJSON {
+				// We'll check the generoMajor after parsing the body.
+			} else {
+				writeError(w, http.StatusConflict,
+					fmt.Sprintf("version %s of %s already exists", version, name))
+				return
+			}
 		}
 	}
 
 	// Dispatch based on Content-Type: JSON-only (new CLI with external
 	// storage like GitHub Releases) or multipart (legacy CLI with zip upload).
-	ct := r.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "application/json") {
+	if isJSON {
 		h.handlePublishJSON(w, r, name, version, ar)
 	} else {
 		h.handlePublishMultipart(w, r, name, version, ar)
@@ -499,6 +537,44 @@ func (h *handler) handlePublishJSON(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
+	// Variant publish: generoMajor is set (e.g., "4", "6").
+	if meta.GeneroMajor != "" {
+		// Check for duplicate variant.
+		if pkg, err := h.store.loadPackage(name); err == nil {
+			if vr := pkg.findVersion(version); vr != nil {
+				if vr.findVariant(meta.GeneroMajor) != nil {
+					writeError(w, http.StatusConflict,
+						fmt.Sprintf("variant genero%s of %s@%s already exists", meta.GeneroMajor, name, version))
+					return
+				}
+			}
+		}
+
+		v := variant{
+			GeneroMajor: meta.GeneroMajor,
+			DownloadURL: meta.DownloadURL,
+			Checksum:    meta.Checksum,
+		}
+		if err := h.store.savePackageVariant(name, version, meta, v); err != nil {
+			log.Printf("publish error for %s@%s genero%s: %v", name, version, meta.GeneroMajor, err)
+			writeError(w, http.StatusInternalServerError, "failed to save package variant")
+			return
+		}
+
+		h.auth.claimOwnership(name, ar.Username) //nolint:errcheck
+
+		writeJSON(w, http.StatusCreated, map[string]string{
+			"name":        name,
+			"version":     version,
+			"generoMajor": meta.GeneroMajor,
+			"checksum":    meta.Checksum,
+			"downloadUrl": meta.DownloadURL,
+		})
+		log.Printf("published %s@%s genero%s by %s", name, version, meta.GeneroMajor, ar.Username)
+		return
+	}
+
+	// Legacy non-variant publish.
 	if err := h.store.savePackageMetadata(name, version, meta); err != nil {
 		log.Printf("publish error for %s@%s: %v", name, version, err)
 		writeError(w, http.StatusInternalServerError, "failed to save package metadata")

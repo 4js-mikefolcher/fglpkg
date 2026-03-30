@@ -85,7 +85,9 @@ type CandidateVersion struct {
 type VersionFetcher func(name string) ([]CandidateVersion, error)
 
 // InfoFetcher fetches full package metadata for a resolved name@version.
-type InfoFetcher func(name, version string) (*registry.PackageInfo, error)
+// generoMajor is the Genero major version to select the correct variant
+// (e.g. "4", "6"). Pass "" for legacy packages without variants.
+type InfoFetcher func(name, version, generoMajor string) (*registry.PackageInfo, error)
 
 // Resolver resolves the full transitive dependency graph.
 type Resolver struct {
@@ -224,7 +226,7 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 			continue
 		}
 
-		info, err := r.fetchInfo(item.name, chosen.String())
+		info, err := r.fetchInfo(item.name, chosen.String(), r.generoVersion.MajorString())
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch info for %s@%s: %w", item.name, chosen, err)
 		}
@@ -468,6 +470,6 @@ func registryVersions(name string) ([]CandidateVersion, error) {
 	return out, nil
 }
 
-func registryInfo(name, version string) (*registry.PackageInfo, error) {
-	return registry.FetchInfo(name, version)
+func registryInfo(name, version, generoMajor string) (*registry.PackageInfo, error) {
+	return registry.FetchInfoForGenero(name, version, generoMajor)
 }

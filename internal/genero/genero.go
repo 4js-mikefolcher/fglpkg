@@ -32,6 +32,10 @@ func (v Version) String() string { return v.original }
 // Semver returns the version as a semver.Version for constraint matching.
 func (v Version) Semver() semver.Version { return v.sv }
 
+// MajorString returns the Genero major version as a string (e.g. "4").
+// This is used as the variant key for platform-specific package builds.
+func (v Version) MajorString() string { return fmt.Sprintf("%d", v.sv.Major) }
+
 // Detect attempts to determine the installed Genero BDL version using
 // the strategy described in the package doc.
 func Detect() (Version, error) {

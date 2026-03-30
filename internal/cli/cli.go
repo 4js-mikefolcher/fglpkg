@@ -16,6 +16,7 @@ import (
 
 	"github.com/4js-mikefolcher/fglpkg/internal/credentials"
 	"github.com/4js-mikefolcher/fglpkg/internal/env"
+	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	gh "github.com/4js-mikefolcher/fglpkg/internal/github"
 	"github.com/4js-mikefolcher/fglpkg/internal/installer"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
@@ -142,13 +143,19 @@ func cmdInstall(args []string) error {
 	if err != nil {
 		return err
 	}
+	gv, err := genero.Detect()
+	if err != nil {
+		return fmt.Errorf("cannot detect Genero version: %w", err)
+	}
+	generoMajor := gv.MajorString()
+
 	for _, pkg := range pkgArgs {
 		name, version, err := parsePackageArg(pkg)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Resolving %s@%s...\n", name, version)
-		info, err := registry.Resolve(name, version)
+		fmt.Printf("Resolving %s@%s (Genero %s)...\n", name, version, gv)
+		info, err := registry.Resolve(name, version, generoMajor)
 		if err != nil {
 			return fmt.Errorf("failed to resolve %s@%s: %w", name, version, err)
 		}
@@ -307,15 +314,21 @@ func cmdPublish(_ []string) error {
 		return err
 	}
 
-	fmt.Printf("Publishing %s@%s to %s...\n", m.Name, m.Version, registryURL)
-	if err := publishPackage(m, token, registryURL, githubToken, owner, repo); err != nil {
+	gv, err := genero.Detect()
+	if err != nil {
+		return fmt.Errorf("cannot detect Genero version: %w", err)
+	}
+	generoMajor := gv.MajorString()
+
+	fmt.Printf("Publishing %s@%s (Genero %s variant) to %s...\n", m.Name, m.Version, generoMajor, registryURL)
+	if err := publishPackage(m, token, registryURL, githubToken, owner, repo, generoMajor); err != nil {
 		return fmt.Errorf("publish failed: %w", err)
 	}
 	fmt.Printf("✓ Published %s@%s\n", m.Name, m.Version)
 	return nil
 }
 
-func publishPackage(m *manifest.Manifest, token, registryURL, githubToken, owner, repo string) error {
+func publishPackage(m *manifest.Manifest, token, registryURL, githubToken, owner, repo, generoMajor string) error {
 	// 1. Build the zip.
 	zipData, checksum, err := buildPackageZip(m)
 	if err != nil {
@@ -325,7 +338,7 @@ func publishPackage(m *manifest.Manifest, token, registryURL, githubToken, owner
 
 	// 2. Upload to GitHub Releases.
 	tag := gh.ReleaseTag(m.Name, m.Version)
-	assetName := gh.AssetName(m.Name, m.Version)
+	assetName := gh.VariantAssetName(m.Name, m.Version, generoMajor)
 	title := fmt.Sprintf("%s v%s", m.Name, m.Version)
 
 	fmt.Printf("  Uploading to GitHub (%s/%s)...\n", owner, repo)
@@ -349,6 +362,7 @@ func publishPackage(m *manifest.Manifest, token, registryURL, githubToken, owner
 		"fglDeps":     m.Dependencies.FGL,
 		"checksum":    checksum,
 		"downloadUrl": downloadURL,
+		"generoMajor": generoMajor,
 	}
 	if len(m.Dependencies.Java) > 0 {
 		meta["javaDeps"] = m.Dependencies.Java

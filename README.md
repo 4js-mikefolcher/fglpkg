@@ -255,6 +255,20 @@ The publish flow:
 - Publishers need a fine-grained PAT with **Contents: Read and write** on the packages repo
 - Consumers (installers) need a fine-grained PAT with **Contents: Read** on the packages repo
 
+### Genero Version Variants
+
+Each package version can have multiple builds, one per Genero major version. When you publish, fglpkg detects your local Genero version and tags the upload as a variant:
+
+```bash
+# On a Genero 4.x machine
+fglpkg publish    # uploads poiapi-1.0.0-genero4.zip
+
+# On a Genero 6.x machine
+fglpkg publish    # uploads poiapi-1.0.0-genero6.zip
+```
+
+Both variants live under the same release (`poiapi-v1.0.0`) as separate assets. When a consumer runs `fglpkg install`, the resolver automatically selects the variant matching their local Genero major version.
+
 ### Registry Storage Layout
 
 ```

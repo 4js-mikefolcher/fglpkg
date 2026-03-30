@@ -85,6 +85,10 @@ type LockedPackage struct {
 	// Empty means the registry provided no checksum (install will skip verify).
 	Checksum string `json:"checksum,omitempty"`
 
+	// GeneroMajor is the Genero major version variant that was selected
+	// (e.g. "4", "6"). Empty for legacy packages without variants.
+	GeneroMajor string `json:"generoMajor,omitempty"`
+
 	// RequiredBy lists every package (or "<root>") that declared a dependency
 	// on this package, enabling humans to trace why it was included.
 	RequiredBy []string `json:"requiredBy"`
@@ -121,6 +125,7 @@ func FromPlan(plan *resolver.Plan, root *manifest.Manifest) *LockFile {
 			Version:     p.Version.String(),
 			DownloadURL: p.DownloadURL,
 			Checksum:    p.Checksum,
+			GeneroMajor: plan.GeneroVersion.MajorString(),
 			RequiredBy:  requiredBy,
 		})
 	}
@@ -263,11 +268,20 @@ func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir
 		return result // nothing else makes sense to check
 	}
 
-	// Genero version check (warn, don't block).
+	// Genero version check. A major version change requires re-resolution
+	// because different variants may be needed.
 	if currentGenero != "" && lf.GeneroVersion != currentGenero {
 		result.GeneroMismatch = &GeneroMismatchError{
 			Locked:  lf.GeneroVersion,
 			Current: currentGenero,
+		}
+		// If the major version changed, force re-resolution for correct variants.
+		if generoMajor(lf.GeneroVersion) != generoMajor(currentGenero) {
+			result.ManifestMismatch = &ManifestMismatchError{
+				Field:      "Genero major version",
+				InLock:     generoMajor(lf.GeneroVersion),
+				InManifest: generoMajor(currentGenero),
+			}
 		}
 	}
 
@@ -296,6 +310,16 @@ func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir
 }
 
 // ─── Plan extraction ──────────────────────────────────────────────────────────
+
+// generoMajor extracts the major version from a version string like "4.01.12".
+func generoMajor(v string) string {
+	for i, c := range v {
+		if c == '.' {
+			return v[:i]
+		}
+	}
+	return v
+}
 
 // ToInstallList converts the lock file back into the flat lists needed by
 // the installer, so a locked install never touches the resolver or registry

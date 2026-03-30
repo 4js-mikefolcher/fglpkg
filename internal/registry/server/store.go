@@ -37,11 +37,38 @@ type versionRecord struct {
 	Author           string            `json:"author"`
 	License          string            `json:"license,omitempty"`
 	GeneroConstraint string            `json:"genero,omitempty"`
-	DownloadURL      string            `json:"downloadUrl,omitempty"`
-	Checksum         string            `json:"checksum"`
+	DownloadURL      string            `json:"downloadUrl,omitempty"` // legacy single-artifact
+	Checksum         string            `json:"checksum"`             // legacy single-artifact
 	FGLDeps          map[string]string `json:"fglDeps,omitempty"`
 	JavaDeps         []javaDep         `json:"javaDeps,omitempty"`
+	Variants         []variant         `json:"variants,omitempty"`
 	PublishedAt      string            `json:"publishedAt"`
+}
+
+// variant represents a Genero-major-version-specific build of a package version.
+type variant struct {
+	GeneroMajor string `json:"generoMajor"` // e.g. "4", "6"
+	DownloadURL string `json:"downloadUrl"`
+	Checksum    string `json:"checksum"`
+}
+
+func (vr *versionRecord) findVariant(generoMajor string) *variant {
+	for i := range vr.Variants {
+		if vr.Variants[i].GeneroMajor == generoMajor {
+			return &vr.Variants[i]
+		}
+	}
+	return nil
+}
+
+func (vr *versionRecord) addOrReplaceVariant(v variant) {
+	for i := range vr.Variants {
+		if vr.Variants[i].GeneroMajor == v.GeneroMajor {
+			vr.Variants[i] = v
+			return
+		}
+	}
+	vr.Variants = append(vr.Variants, v)
 }
 
 func (pm *packageMeta) findVersion(version string) *versionRecord {
@@ -249,6 +276,61 @@ func (s *fileStore) savePackageMetadata(name, version string, meta publishReques
 	}
 
 	return nil
+}
+
+// savePackageVariant adds or updates a Genero variant for a package version.
+// If the version does not exist yet, it is created. If the variant already
+// exists, it is replaced.
+func (s *fileStore) savePackageVariant(name, version string, meta publishRequest, v variant) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(s.metaPath(name)), 0755); err != nil {
+		return fmt.Errorf("cannot create metadata dir: %w", err)
+	}
+
+	var pm packageMeta
+	if existing, err := s.loadPackageLocked(name); err == nil {
+		pm = *existing
+	} else {
+		pm = packageMeta{Name: name}
+	}
+
+	vr := pm.findVersion(version)
+	if vr == nil {
+		// First variant for this version — create the record.
+		vr = &versionRecord{
+			Version:          version,
+			Description:      meta.Description,
+			Author:           meta.Author,
+			License:          meta.License,
+			GeneroConstraint: meta.GeneroConstraint,
+			FGLDeps:          meta.FGLDeps,
+			JavaDeps:         meta.JavaDeps,
+			PublishedAt:      time.Now().UTC().Format(time.RFC3339),
+		}
+		pm.Versions = append(pm.Versions, vr)
+	}
+
+	vr.addOrReplaceVariant(v)
+
+	// Set legacy fields from the first variant for backward compatibility.
+	if vr.DownloadURL == "" {
+		vr.DownloadURL = v.DownloadURL
+		vr.Checksum = v.Checksum
+	}
+
+	if err := atomicWriteJSON(s.metaPath(name), &pm); err != nil {
+		return fmt.Errorf("cannot update package meta: %w", err)
+	}
+
+	s.index.Packages[name] = &indexEntry{
+		Name:          name,
+		LatestVersion: version,
+		Description:   meta.Description,
+		Author:        meta.Author,
+	}
+	return s.saveIndexLocked()
 }
 
 // deleteVersion removes a version's blob and strips its record from meta.json.
