@@ -19,13 +19,17 @@ fglpkg/
 │   ├── installer/installer.go      # Zip download, extraction, JAR management
 │   ├── lockfile/lockfile.go        # fglpkg.lock read/write/validate
 │   ├── checksum/checksum.go        # SHA256 streaming verification
-│   ├── credentials/                # Registry auth credential storage
+│   ├── credentials/                # Registry + GitHub credential storage
+│   ├── github/github.go            # GitHub Releases API client
 │   ├── workspace/workspace.go      # Monorepo workspace support
 │   ├── registry/registry.go        # Registry HTTP client
 │   └── registry/server/            # Registry HTTP server
 │       ├── server.go               # Route handlers
 │       ├── store.go                # Flat-file storage backend
 │       └── testing.go              # Test helper (NewTestServer)
+├── docs/
+│   ├── user-guide.md               # User instruction guide
+│   └── github-token-setup.md       # GitHub PAT setup instructions
 ├── .github/workflows/release.yml   # Automated release on tag push
 ├── go.mod
 └── README.md
@@ -36,17 +40,25 @@ fglpkg/
 Download the latest binary for your platform from [GitHub Releases](https://github.com/4js-mikefolcher/fglpkg/releases) and place it in your `PATH`:
 
 ```bash
-# Example for macOS Apple Silicon
+# macOS / Linux
 sudo cp fglpkg-darwin-arm64 /usr/local/bin/fglpkg
 sudo chmod +x /usr/local/bin/fglpkg
+```
+
+```powershell
+# Windows — copy to a directory in your PATH
+copy fglpkg-windows-amd64.exe C:\tools\fglpkg.exe
 ```
 
 Add environment setup to your shell profile:
 
 ```bash
+# macOS / Linux — add to ~/.bashrc or ~/.zshrc
 echo 'eval "$(fglpkg env)"' >> ~/.bashrc
 source ~/.bashrc
 ```
+
+On Windows, run `fglpkg env` and set the displayed variables manually, or use the `SET` output format that fglpkg generates on Windows.
 
 ## Building from Source
 
@@ -57,7 +69,8 @@ go build -o fglpkg ./cmd/fglpkg
 Use the build script to cross-compile for all platforms with embedded version info:
 
 ```bash
-FGLPKG_VERSION=1.0.0 ./cmd/build.sh
+./cmd/build.sh                    # uses default version from script
+FGLPKG_VERSION=2.0.0 ./cmd/build.sh   # override version
 ```
 
 This produces ARM and Intel binaries for Linux, macOS, and Windows in the `./bin/` directory.
@@ -80,7 +93,7 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 ├── jars/              # Java JARs
 │   ├── gson-2.10.1.jar
 │   └── commons-lang3-3.12.0.jar
-└── credentials.json   # Registry auth tokens
+└── credentials.json   # Registry + GitHub auth tokens
 ```
 
 ## fglpkg.json Format
@@ -168,28 +181,51 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 ## Usage
 
 ```bash
-fglpkg init                   # Initialise fglpkg.json interactively
-fglpkg install                # Install all deps from fglpkg.json
-fglpkg install myutils        # Add + install latest version
-fglpkg install myutils@1.2.0  # Add + install specific version
-fglpkg remove myutils         # Remove a package
-fglpkg update                 # Re-resolve and update all dependencies
-fglpkg list                   # List installed packages
-fglpkg env                    # Print export statements
-fglpkg search json            # Search registry
-fglpkg publish                # Publish current package to registry
-fglpkg unpublish pkg@1.0.0    # Remove a published version
-fglpkg login                  # Save registry credentials
-fglpkg logout                 # Remove saved credentials
-fglpkg whoami                 # Show current authenticated user
+# Package management
+fglpkg init                              # Initialise fglpkg.json interactively
+fglpkg install                           # Install all deps from fglpkg.json
+fglpkg install --local                   # Install to project-local .fglpkg/ directory
+fglpkg install myutils                   # Add + install latest version
+fglpkg install myutils@1.2.0             # Add + install specific version
+fglpkg remove myutils                    # Remove a package
+fglpkg update                            # Re-resolve and update all dependencies
+fglpkg list                              # List installed packages
+fglpkg env                               # Print export statements
+fglpkg search json                       # Search registry
+
+# Publishing
+fglpkg publish                           # Publish current package to registry
+fglpkg unpublish pkg@1.0.0               # Remove a published version
+
+# Authentication
+fglpkg login                             # Save registry + GitHub credentials
+fglpkg logout                            # Remove saved credentials
+fglpkg whoami                            # Show current authenticated user
+
+# Registry configuration (admin)
 fglpkg config github-repos list          # List configured GitHub repos
-fglpkg config github-repos add o/r       # Add a GitHub package repo (admin)
-fglpkg config github-repos remove o/r    # Remove a GitHub package repo (admin)
-fglpkg owner list <pkg>       # List package owners
-fglpkg owner add <pkg> <user> # Add a package owner
-fglpkg workspace init         # Initialise a monorepo workspace
-fglpkg version                # Print version and build info
-fglpkg help                   # Show help
+fglpkg config github-repos add o/r       # Add a GitHub package repo
+fglpkg config github-repos remove o/r    # Remove a GitHub package repo
+
+# Package ownership
+fglpkg owner list <pkg>                  # List package owners
+fglpkg owner add <pkg> <user>            # Add a package owner
+fglpkg owner remove <pkg> <user>         # Remove a package owner
+
+# Token management (admin)
+fglpkg token create <user>               # Create a user + token
+fglpkg token revoke [<user>]             # Revoke a token
+fglpkg token rotate                      # Rotate your own token
+
+# Workspaces
+fglpkg workspace init [paths...]         # Initialise a monorepo workspace
+fglpkg workspace add <path>              # Add a member to the workspace
+fglpkg workspace list                    # List workspace members
+fglpkg workspace info                    # Show workspace details
+
+# Misc
+fglpkg version                           # Print version and build info
+fglpkg help                              # Show help
 ```
 
 ## Running the Registry Server
@@ -213,14 +249,22 @@ export FGLPKG_REGISTRY=https://registry.example.com
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/packages/:name/versions` | List all versions + Genero constraints |
-| `GET` | `/packages/:name/:version` | Full package metadata |
-| `GET` | `/packages/:name/:version/download` | Download the zip |
-| `POST` | `/packages/:name/:version/publish` | Publish a new version (auth required) |
+| `GET` | `/packages/:name/versions` | List all versions, Genero constraints, and available variants |
+| `GET` | `/packages/:name/:version` | Full package metadata (append `?genero=4` to select a variant) |
+| `GET` | `/packages/:name/:version/download` | Download the zip (or redirect to external storage) |
+| `POST` | `/packages/:name/:version/publish` | Publish a new version or variant (auth required) |
 | `DELETE` | `/packages/:name/:version/unpublish` | Remove a published version (auth required) |
+| `GET` | `/packages/:name/owners` | List package owners |
+| `POST` | `/packages/:name/owners` | Add a package owner (auth required) |
+| `DELETE` | `/packages/:name/owners/:user` | Remove a package owner (auth required) |
 | `GET` | `/config` | Registry configuration (GitHub repos) |
 | `POST` | `/config/github-repos` | Add a GitHub repo (admin only) |
 | `DELETE` | `/config/github-repos/:owner/:repo` | Remove a GitHub repo (admin only) |
+| `POST` | `/auth/token` | Create a user + token (admin only) |
+| `DELETE` | `/auth/token` | Revoke a token |
+| `POST` | `/auth/token/rotate` | Rotate own token |
+| `GET` | `/auth/whoami` | Identify current token |
+| `GET` | `/auth/users` | List all users (admin only) |
 | `GET` | `/search?q=<term>` | Search by name or description |
 | `GET` | `/health` | Liveness probe |
 
@@ -271,14 +315,24 @@ Both variants live under the same release (`poiapi-v1.0.0`) as separate assets. 
 
 ### Registry Storage Layout
 
+The registry server stores only metadata. Package zips are hosted on GitHub Releases.
+
 ```
 /var/lib/fglpkg-registry/
 ├── index.json                  # global package catalogue
+├── config.json                 # registry configuration (GitHub repos)
+├── auth.json                   # user tokens and ownership
 └── packages/
     └── myutils/
-        ├── meta.json           # all version records for myutils
-        ├── 1.0.0.zip
-        └── 1.1.0.zip
+        └── meta.json           # all version records + variant info
+```
+
+Package zips are stored as GitHub Release assets:
+
+```
+GitHub Release: myutils-v1.0.0
+├── myutils-1.0.0-genero4.zip  # variant for Genero 4.x
+└── myutils-1.0.0-genero6.zip  # variant for Genero 6.x
 ```
 
 ## Releases
