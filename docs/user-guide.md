@@ -76,8 +76,10 @@ sudo cp fglpkg /usr/local/bin/
 fglpkg manages the `FGLLDPATH` and `CLASSPATH` environment variables so Genero can find installed packages and JARs. Add this line to your shell profile (`~/.bashrc`, `~/.zshrc`, or equivalent):
 
 ```bash
-eval "$(fglpkg env)"
+eval "$(fglpkg env --global)"
 ```
+
+Use `--global` in your shell profile so it always includes all globally installed packages, regardless of your current directory.
 
 Then reload your shell:
 
@@ -85,12 +87,23 @@ Then reload your shell:
 source ~/.bashrc
 ```
 
-Running `fglpkg env` on its own shows the export statements it generates:
+Running `fglpkg env` shows the export statements it generates. The output varies depending on context:
 
 ```bash
+# Inside a project directory (with fglpkg.json or .fglpkg/) — shows local packages
 $ fglpkg env
+export FGLLDPATH=/path/to/project/.fglpkg/packages/poiapi"${FGLLDPATH:+:$FGLLDPATH}"
+export CLASSPATH=/path/to/project/.fglpkg/jars/poi-5.2.3.jar"${CLASSPATH:+:$CLASSPATH}"
+
+# With --global — shows all globally installed packages
+$ fglpkg env --global
 export FGLLDPATH=/Users/you/.fglpkg/packages/myutils:/Users/you/.fglpkg/packages/poiapi"${FGLLDPATH:+:$FGLLDPATH}"
 export CLASSPATH=/Users/you/.fglpkg/jars/poi-5.2.3.jar:/Users/you/.fglpkg/jars/gson-2.10.1.jar"${CLASSPATH:+:$CLASSPATH}"
+
+# With --gst — Genero Studio format (always local, uses $(ProjectDir))
+$ fglpkg env --gst
+FGLLDPATH=$(ProjectDir)/.fglpkg/packages/poiapi;$(FGLLDPATH)
+CLASSPATH=$(ProjectDir)/.fglpkg/jars/poi-5.2.3.jar;$(CLASSPATH)
 ```
 
 Key points:
@@ -134,6 +147,24 @@ This interactively prompts for the package name, version, description, and autho
 
 ## Managing Dependencies
 
+### Local vs Global (Context-Aware)
+
+fglpkg automatically detects whether to install packages locally or globally:
+
+- **Inside a project** (directory has `.fglpkg/` or `fglpkg.json`): packages install to `.fglpkg/` in the project directory
+- **Outside a project**: packages install to `~/.fglpkg/` (global)
+
+You can override this with flags:
+
+```bash
+fglpkg install --local     # force local .fglpkg/
+fglpkg install --global    # force global ~/.fglpkg/
+```
+
+These flags work on `install`, `remove`, `update`, `list`, and `env`.
+
+When using local installs, add `.fglpkg/` to your `.gitignore`.
+
 ### Installing All Dependencies
 
 If your project already has a `fglpkg.json` with dependencies listed, install them all:
@@ -142,7 +173,7 @@ If your project already has a `fglpkg.json` with dependencies listed, install th
 fglpkg install
 ```
 
-This resolves the dependency graph, writes a lock file (`fglpkg.lock`), downloads BDL packages from the registry, and downloads Java JARs from Maven Central.
+This resolves the dependency graph, writes a lock file (`fglpkg.lock`), downloads BDL packages from the registry, and downloads Java JARs from Maven Central. Because `fglpkg.json` exists, packages are installed locally to `.fglpkg/` by default.
 
 ### Adding a Package
 

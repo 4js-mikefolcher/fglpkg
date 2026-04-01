@@ -146,6 +146,110 @@ func (g *Generator) buildJavaClasspath() (string, error) {
 	return strings.Join(jars, sep), nil
 }
 
+// GenerateLocal returns export lines using only the local project's
+// .fglpkg/packages and .fglpkg/jars directories.
+func (g *Generator) GenerateLocal() ([]string, error) {
+	var lines []string
+
+	localPkgs := filepath.Join(".", ".fglpkg", "packages")
+	fglldpath, err := g.buildPathsFrom(localPkgs, true)
+	if err != nil {
+		return nil, err
+	}
+	if fglldpath != "" {
+		lines = append(lines, g.prependExportLine("FGLLDPATH", fglldpath))
+	}
+
+	localJars := filepath.Join(".", ".fglpkg", "jars")
+	classpath, err := g.buildPathsFrom(localJars, false)
+	if err != nil {
+		return nil, err
+	}
+	if classpath != "" {
+		lines = append(lines, g.prependExportLine("CLASSPATH", classpath))
+	}
+
+	return lines, nil
+}
+
+// GenerateGST returns environment variable assignments in Genero Studio
+// format. Genero Studio uses:
+//   - $(ProjectDir) for the base project directory
+//   - $(VARIABLE) to reference environment variables
+//   - ; as the path separator (always, regardless of OS)
+func (g *Generator) GenerateGST() ([]string, error) {
+	var lines []string
+
+	localPkgs := filepath.Join(".", ".fglpkg", "packages")
+	fglldpath, err := g.buildGSTPaths(localPkgs, true)
+	if err != nil {
+		return nil, err
+	}
+	if fglldpath != "" {
+		lines = append(lines, fmt.Sprintf("FGLLDPATH=%s;$(FGLLDPATH)", fglldpath))
+	}
+
+	localJars := filepath.Join(".", ".fglpkg", "jars")
+	classpath, err := g.buildGSTPaths(localJars, false)
+	if err != nil {
+		return nil, err
+	}
+	if classpath != "" {
+		lines = append(lines, fmt.Sprintf("CLASSPATH=%s;$(CLASSPATH)", classpath))
+	}
+
+	return lines, nil
+}
+
+// buildPathsFrom scans a directory and returns paths joined by the OS separator.
+// If isDirs is true, it collects subdirectories; otherwise, it collects .jar files.
+func (g *Generator) buildPathsFrom(dir string, isDirs bool) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", nil
+	}
+	entries, err := os.ReadDir(abs)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("cannot read directory %s: %w", dir, err)
+	}
+
+	sep := pathSeparator()
+	var parts []string
+	for _, e := range entries {
+		if isDirs && e.IsDir() {
+			parts = append(parts, filepath.Join(abs, e.Name()))
+		} else if !isDirs && !e.IsDir() && strings.HasSuffix(e.Name(), ".jar") {
+			parts = append(parts, filepath.Join(abs, e.Name()))
+		}
+	}
+	return strings.Join(parts, sep), nil
+}
+
+// buildGSTPaths scans a directory and returns paths in Genero Studio format,
+// using $(ProjectDir) as the base and ; as the separator.
+func (g *Generator) buildGSTPaths(dir string, isDirs bool) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("cannot read directory %s: %w", dir, err)
+	}
+
+	var parts []string
+	for _, e := range entries {
+		if isDirs && e.IsDir() {
+			parts = append(parts, "$(ProjectDir)/.fglpkg/packages/"+e.Name())
+		} else if !isDirs && !e.IsDir() && strings.HasSuffix(e.Name(), ".jar") {
+			parts = append(parts, "$(ProjectDir)/.fglpkg/jars/"+e.Name())
+		}
+	}
+	return strings.Join(parts, ";"), nil
+}
+
 // prependExportLine emits a shell statement that prepends value to the
 // existing variable, so that user/system entries are never lost.
 //

@@ -109,24 +109,16 @@ func cmdInit(_ []string) error {
 // ─── install ──────────────────────────────────────────────────────────────────
 
 func cmdInstall(args []string) error {
-	local := false
-	var pkgArgs []string
-	for _, a := range args {
-		if a == "--local" || a == "-l" {
-			local = true
-		} else {
-			pkgArgs = append(pkgArgs, a)
-		}
-	}
+	pkgArgs, forceLocal, forceGlobal := parseFlags(args)
 
-	home, err := installHome(local)
+	home, isLocal, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
 		return err
 	}
 	inst := newInstaller(home)
 	projectDir, _ := os.Getwd()
 
-	if local {
+	if isLocal {
 		fmt.Println("Installing to local project directory (.fglpkg/)")
 		fmt.Println("  Tip: add .fglpkg/ to your .gitignore file")
 	}
@@ -169,27 +161,70 @@ func cmdInstall(args []string) error {
 	return inst.InstallAll(m, projectDir, true)
 }
 
-// installHome returns the fglpkg home directory for installs. When local is
-// true, it returns .fglpkg/ in the current working directory instead of the
-// global ~/.fglpkg/.
-func installHome(local bool) (string, error) {
-	if local {
+// resolveHome returns the fglpkg home directory based on context:
+//   - --local flag: always use .fglpkg/ in the current directory
+//   - --global flag: always use ~/.fglpkg/
+//   - no flag (default): use .fglpkg/ if a local .fglpkg/ directory or
+//     fglpkg.json exists in the current directory, otherwise ~/.fglpkg/
+//
+// Returns the home path and whether it is local.
+func resolveHome(forceLocal, forceGlobal bool) (home string, isLocal bool, err error) {
+	if forceLocal {
 		wd, err := os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("cannot determine working directory: %w", err)
+			return "", false, fmt.Errorf("cannot determine working directory: %w", err)
 		}
-		return filepath.Join(wd, ".fglpkg"), nil
+		return filepath.Join(wd, ".fglpkg"), true, nil
 	}
-	return fglpkgHome()
+	if forceGlobal {
+		h, err := fglpkgHome()
+		return h, false, err
+	}
+	// Context-aware: check if we're inside a project.
+	if isProjectDir() {
+		wd, _ := os.Getwd()
+		return filepath.Join(wd, ".fglpkg"), true, nil
+	}
+	h, err := fglpkgHome()
+	return h, false, err
+}
+
+// isProjectDir returns true if the current directory looks like a project
+// (has a .fglpkg/ directory or a fglpkg.json file).
+func isProjectDir() bool {
+	if _, err := os.Stat(".fglpkg"); err == nil {
+		return true
+	}
+	if _, err := os.Stat(manifest.Filename); err == nil {
+		return true
+	}
+	return false
+}
+
+// parseFlags extracts --local/-l and --global/-g flags from args,
+// returning the remaining args and the flag values.
+func parseFlags(args []string) (remaining []string, local, global bool) {
+	for _, a := range args {
+		switch a {
+		case "--local", "-l":
+			local = true
+		case "--global", "-g":
+			global = true
+		default:
+			remaining = append(remaining, a)
+		}
+	}
+	return
 }
 
 // ─── remove ───────────────────────────────────────────────────────────────────
 
 func cmdRemove(args []string) error {
-	if len(args) == 0 {
+	pkgArgs, forceLocal, forceGlobal := parseFlags(args)
+	if len(pkgArgs) == 0 {
 		return fmt.Errorf("usage: fglpkg remove <package>")
 	}
-	home, err := fglpkgHome()
+	home, _, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
 		return err
 	}
@@ -198,7 +233,7 @@ func cmdRemove(args []string) error {
 		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
 	}
 	inst := newInstaller(home)
-	for _, pkg := range args {
+	for _, pkg := range pkgArgs {
 		if err := inst.Remove(pkg); err != nil {
 			return fmt.Errorf("failed to remove %s: %w", pkg, err)
 		}
@@ -210,8 +245,9 @@ func cmdRemove(args []string) error {
 
 // ─── update ───────────────────────────────────────────────────────────────────
 
-func cmdUpdate(_ []string) error {
-	home, err := fglpkgHome()
+func cmdUpdate(args []string) error {
+	_, forceLocal, forceGlobal := parseFlags(args)
+	home, _, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
 		return err
 	}
@@ -226,8 +262,9 @@ func cmdUpdate(_ []string) error {
 
 // ─── list ─────────────────────────────────────────────────────────────────────
 
-func cmdList(_ []string) error {
-	home, err := fglpkgHome()
+func cmdList(args []string) error {
+	_, forceLocal, forceGlobal := parseFlags(args)
+	home, _, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
 		return err
 	}
@@ -248,12 +285,38 @@ func cmdList(_ []string) error {
 
 // ─── env ──────────────────────────────────────────────────────────────────────
 
-func cmdEnv(_ []string) error {
+func cmdEnv(args []string) error {
+	_, forceLocal, forceGlobal := parseFlags(args)
+	gst := false
+	for _, a := range args {
+		if a == "--gst" {
+			gst = true
+		}
+	}
+
 	home, err := fglpkgHome()
 	if err != nil {
 		return err
 	}
-	exports, err := env.New(home).Generate()
+	g := env.New(home)
+
+	// Determine if we should use local-only output.
+	// --gst always implies local. Otherwise, context-aware: if inside a
+	// project directory (has .fglpkg/ or fglpkg.json), default to local.
+	useLocal := forceLocal || gst
+	if !forceGlobal && !useLocal {
+		useLocal = isProjectDir()
+	}
+
+	var exports []string
+	switch {
+	case gst:
+		exports, err = g.GenerateGST()
+	case useLocal:
+		exports, err = g.GenerateLocal()
+	default:
+		exports, err = g.Generate()
+	}
 	if err != nil {
 		return err
 	}
@@ -1055,7 +1118,7 @@ USAGE:
 
 COMMANDS:
   init              Create a new fglpkg.json
-  install [--local] Install all dependencies (or add a specific package)
+  install [pkg...]  Install all dependencies (or add specific packages)
   remove <pkg>      Remove a package
   update            Re-resolve and update all dependencies
   list              List installed packages
@@ -1073,6 +1136,14 @@ COMMANDS:
   version           Print fglpkg version
   help              Show this help
 
+FLAGS (for install, remove, update, list, env):
+  --local, -l       Force local project directory (.fglpkg/)
+  --global, -g      Force global home directory (~/.fglpkg/)
+  (default)         Auto-detect: local if .fglpkg/ or fglpkg.json exists
+
+FLAGS (for env only):
+  --gst             Output in Genero Studio format (implies --local)
+
 ENVIRONMENT:
   FGLPKG_HOME            Override ~/.fglpkg
   FGLPKG_REGISTRY        Override default registry URL
@@ -1082,7 +1153,7 @@ ENVIRONMENT:
   FGLPKG_GENERO_VERSION  Override Genero version detection
 
 SETUP:
-  Add to ~/.bashrc:  eval "$(fglpkg env)"
+  Add to ~/.bashrc:  eval "$(fglpkg env --global)"
 
 `)
 }

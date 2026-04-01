@@ -54,11 +54,13 @@ Add environment setup to your shell profile:
 
 ```bash
 # macOS / Linux — add to ~/.bashrc or ~/.zshrc
-echo 'eval "$(fglpkg env)"' >> ~/.bashrc
+echo 'eval "$(fglpkg env --global)"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-On Windows, run `fglpkg env` and set the displayed variables manually, or use the `SET` output format that fglpkg generates on Windows.
+Use `--global` in your shell profile so it always includes all globally installed packages regardless of your current directory.
+
+On Windows, run `fglpkg env --global` and set the displayed variables manually, or use the `SET` output format that fglpkg generates on Windows.
 
 ## Building from Source
 
@@ -94,6 +96,35 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 │   ├── gson-2.10.1.jar
 │   └── commons-lang3-3.12.0.jar
 └── credentials.json   # Registry + GitHub auth tokens
+```
+
+When working inside a project, fglpkg can also install to a local `.fglpkg/` directory:
+
+```
+myproject/
+├── fglpkg.json
+├── .fglpkg/           # Local package install (add to .gitignore)
+│   ├── packages/
+│   └── jars/
+└── ...
+```
+
+## Local vs Global (Context-Aware)
+
+fglpkg automatically detects whether to use local or global package storage:
+
+| Current directory has... | Default behavior |
+|---|---|
+| `.fglpkg/` directory | Local (`.fglpkg/`) |
+| `fglpkg.json` file | Local (`.fglpkg/`) |
+| Neither | Global (`~/.fglpkg/`) |
+
+Override with `--local` / `-l` or `--global` / `-g` on `install`, `remove`, `update`, `list`, and `env`.
+
+For shell profiles, always use `--global` so all installed packages are available regardless of directory:
+
+```bash
+eval "$(fglpkg env --global)"
 ```
 
 ## fglpkg.json Format
@@ -183,14 +214,17 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 ```bash
 # Package management
 fglpkg init                              # Initialise fglpkg.json interactively
-fglpkg install                           # Install all deps from fglpkg.json
-fglpkg install --local                   # Install to project-local .fglpkg/ directory
+fglpkg install                           # Install deps (auto-detects local vs global)
 fglpkg install myutils                   # Add + install latest version
 fglpkg install myutils@1.2.0             # Add + install specific version
+fglpkg install --global                  # Force install to ~/.fglpkg/
+fglpkg install --local                   # Force install to .fglpkg/
 fglpkg remove myutils                    # Remove a package
 fglpkg update                            # Re-resolve and update all dependencies
 fglpkg list                              # List installed packages
-fglpkg env                               # Print export statements
+fglpkg env                               # Print export statements (auto-detects scope)
+fglpkg env --global                      # Print exports for all global packages
+fglpkg env --gst                         # Print in Genero Studio format
 fglpkg search json                       # Search registry
 
 # Publishing
