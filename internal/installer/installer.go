@@ -290,11 +290,28 @@ func downloadAndVerify(url, expectedChecksum, name string, w io.Writer, authToke
 		return fmt.Errorf("download failed for %s: %w", name, err)
 	}
 	if authToken != "" && gh.IsGitHubURL(url) {
-		req.Header.Set("Authorization", "token "+authToken)
+		req.Header.Set("Authorization", "Bearer "+authToken)
 		req.Header.Set("Accept", "application/octet-stream")
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	// Use a custom client for GitHub API downloads. GitHub redirects asset
+	// downloads to a different host (github-releases.githubusercontent.com),
+	// and Go's default client strips the Authorization header on cross-host
+	// redirects. We need to preserve the token through the redirect chain.
+	client := http.DefaultClient
+	if authToken != "" && gh.IsGitHubURL(url) {
+		client = &http.Client{
+			CheckRedirect: func(r *http.Request, via []*http.Request) error {
+				if len(via) > 10 {
+					return fmt.Errorf("too many redirects")
+				}
+				r.Header.Set("Authorization", "Bearer "+authToken)
+				return nil
+			},
+		}
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("download failed for %s: %w", name, err)
 	}

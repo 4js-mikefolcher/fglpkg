@@ -1120,8 +1120,18 @@ func resolveGitHubRepo() (owner, repo string, err error) {
 }
 
 func newInstaller(home string) *installer.Installer {
+	// Always look up credentials from the global home directory, even when
+	// installing to a local project directory (--local).
+	globalHome, err := fglpkgHome()
+	if err != nil {
+		globalHome = home
+	}
 	registryURL := defaultRegistry()
-	githubToken := credentials.GitHubTokenFor(home, registryURL)
+	githubToken := credentials.GitHubTokenFor(globalHome, registryURL)
+	if githubToken == "" {
+		fmt.Println("  Warning: no GitHub token configured — downloads from private repos will fail")
+		fmt.Println("  Run 'fglpkg login' or set FGLPKG_GITHUB_TOKEN")
+	}
 	return installer.New(home, githubToken)
 }
 

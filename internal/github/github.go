@@ -211,7 +211,7 @@ func isNotFound(err error) bool {
 }
 
 func setHeaders(req *http.Request, token string) {
-	req.Header.Set("Authorization", "token "+token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 }
