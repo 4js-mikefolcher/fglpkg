@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
@@ -28,6 +30,8 @@ type Manifest struct {
 	Dependencies     Dependencies      `json:"dependencies"`
 	Root             string            `json:"root,omitempty"`  // base directory for package files (default ".")
 	Files            []string          `json:"files,omitempty"` // glob patterns for package zip
+	Bin              map[string]string `json:"bin,omitempty"`   // command name -> script path
+	Docs             []string          `json:"docs,omitempty"`  // glob patterns for doc files
 	Scripts          map[string]string `json:"scripts,omitempty"`
 }
 
@@ -87,6 +91,24 @@ func (j JavaDependency) JarFileName() string {
 // Key returns a unique string key for this Java dep (groupId:artifactId).
 func (j JavaDependency) Key() string {
 	return j.GroupID + ":" + j.ArtifactID
+}
+
+// BinFiles returns the deduplicated script file paths from the bin map,
+// sorted for deterministic ordering.
+func (m *Manifest) BinFiles() []string {
+	if len(m.Bin) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var paths []string
+	for _, p := range m.Bin {
+		if !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // New creates a new Manifest with sensible defaults.
@@ -193,6 +215,28 @@ func (m *Manifest) Validate() error {
 			return fmt.Errorf(
 				"java dependency missing required fields (groupId, artifactId, version): %+v", dep,
 			)
+		}
+	}
+	for cmd, scriptPath := range m.Bin {
+		if cmd == "" {
+			return fmt.Errorf("bin command name must not be empty")
+		}
+		if strings.ContainsAny(cmd, "/\\") {
+			return fmt.Errorf("bin command name %q must not contain path separators", cmd)
+		}
+		if scriptPath == "" {
+			return fmt.Errorf("bin script path for command %q must not be empty", cmd)
+		}
+		if filepath.IsAbs(scriptPath) {
+			return fmt.Errorf("bin script path %q for command %q must be relative", scriptPath, cmd)
+		}
+	}
+	for _, pattern := range m.Docs {
+		// Strip doublestar segments for validation since filepath.Match
+		// doesn't support "**", but the rest of the pattern must be valid.
+		cleaned := strings.ReplaceAll(pattern, "**", "star")
+		if _, err := filepath.Match(cleaned, "test"); err != nil {
+			return fmt.Errorf("invalid docs glob pattern %q: %w", pattern, err)
 		}
 	}
 	return nil

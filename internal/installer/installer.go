@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/checksum"
@@ -205,7 +206,18 @@ func (i *Installer) Install(info *registry.PackageInfo) error {
 	if err := os.RemoveAll(destDir); err != nil {
 		return fmt.Errorf("cannot clean existing package dir: %w", err)
 	}
-	return extractZip(tmpName, destDir)
+	if err := extractZip(tmpName, destDir); err != nil {
+		return err
+	}
+
+	// Make bin scripts executable after extraction.
+	pkgManifest, err := manifest.Load(destDir)
+	if err == nil && len(pkgManifest.Bin) > 0 {
+		if err := makeBinScriptsExecutable(destDir, pkgManifest); err != nil {
+			return fmt.Errorf("cannot set bin script permissions: %w", err)
+		}
+	}
+	return nil
 }
 
 // InstallJar downloads and verifies a Java JAR into the jars directory.
@@ -342,6 +354,25 @@ func (i *Installer) ensureDirs() error {
 	for _, d := range []string{i.packagesDir, i.jarsDir} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return fmt.Errorf("cannot create directory %s: %w", d, err)
+		}
+	}
+	return nil
+}
+
+// makeBinScriptsExecutable sets the executable bit on all bin scripts
+// after extraction. On Windows this is a no-op.
+func makeBinScriptsExecutable(pkgDir string, m *manifest.Manifest) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	for _, scriptPath := range m.BinFiles() {
+		fullPath := filepath.Join(pkgDir, scriptPath)
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			return fmt.Errorf("bin script %q not found in installed package: %w", scriptPath, err)
+		}
+		if err := os.Chmod(fullPath, info.Mode()|0111); err != nil {
+			return fmt.Errorf("cannot chmod %s: %w", fullPath, err)
 		}
 	}
 	return nil

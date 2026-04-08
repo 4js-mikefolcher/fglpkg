@@ -11,7 +11,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/credentials"
@@ -77,6 +79,10 @@ func Execute() error {
 		return cmdConfig(args)
 	case "workspace", "ws":
 		return cmdWorkspace(args)
+	case "run":
+		return cmdRun(args)
+	case "docs":
+		return cmdDocs(args)
 	case "version":
 		fmt.Printf("fglpkg version %s (build %s)\n", Version, Build)
 		return nil
@@ -505,6 +511,58 @@ func buildPackageZip(m *manifest.Manifest) ([]byte, string, error) {
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("error walking root %q: %w", root, err)
+	}
+
+	// Include bin script files so they are present in the installed package.
+	for _, scriptPath := range m.BinFiles() {
+		fullPath := filepath.Join(root, scriptPath)
+		if added[fullPath] {
+			continue
+		}
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("bin script %q not found: %w", scriptPath, err)
+		}
+		if info.IsDir() {
+			return nil, "", fmt.Errorf("bin script %q is a directory, not a file", scriptPath)
+		}
+		relPath, relErr := filepath.Rel(".", fullPath)
+		if relErr != nil {
+			relPath = fullPath
+		}
+		if err := addFileToZip(zw, fullPath, relPath); err != nil {
+			return nil, "", fmt.Errorf("cannot add bin script %s to zip: %w", scriptPath, err)
+		}
+		added[fullPath] = true
+	}
+
+	// Include doc files matching the docs glob patterns.
+	if len(m.Docs) > 0 {
+		err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			if added[path] {
+				return nil
+			}
+			relPath, relErr := filepath.Rel(".", path)
+			if relErr != nil {
+				relPath = path
+			}
+			for _, pattern := range m.Docs {
+				if matchGlob(pattern, relPath) {
+					if err := addFileToZip(zw, path, relPath); err != nil {
+						return fmt.Errorf("cannot add doc file %s to zip: %w", path, err)
+					}
+					added[path] = true
+					break
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, "", fmt.Errorf("error collecting doc files: %w", err)
+		}
 	}
 
 	// Always include the manifest from the current directory.
@@ -1050,6 +1108,295 @@ func cmdWorkspaceInfo() error {
 	return nil
 }
 
+// ─── run ─────────────────────────────────────────────────────────────────────
+
+func cmdRun(args []string) error {
+	if len(args) > 0 && (args[0] == "--list" || args[0] == "-l") {
+		return cmdRunList()
+	}
+
+	if len(args) == 0 {
+		return fmt.Errorf("usage: fglpkg run <command> [-- args...]\n       fglpkg run --list")
+	}
+
+	commandName := args[0]
+
+	// Split on "--" to separate fglpkg args from script args.
+	var scriptArgs []string
+	for i, a := range args[1:] {
+		if a == "--" {
+			scriptArgs = args[i+2:]
+			break
+		}
+	}
+	// If no "--" found, pass remaining args directly.
+	if scriptArgs == nil && len(args) > 1 {
+		scriptArgs = args[1:]
+	}
+
+	scriptPath, pkgName, err := findBinCommand(commandName)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Running %q from package %s...\n", commandName, pkgName)
+
+	cmd := exec.Command(scriptPath, scriptArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
+}
+
+func cmdRunList() error {
+	type entry struct {
+		command string
+		pkgName string
+		source  string
+		script  string
+	}
+	var entries []entry
+
+	scanPackagesDir := func(packagesDir, source string) {
+		dirEntries, err := os.ReadDir(packagesDir)
+		if err != nil {
+			return
+		}
+		for _, e := range dirEntries {
+			if !e.IsDir() {
+				continue
+			}
+			pkgDir := filepath.Join(packagesDir, e.Name())
+			m, err := manifest.Load(pkgDir)
+			if err != nil {
+				continue
+			}
+			// Sort command names for deterministic output.
+			cmds := make([]string, 0, len(m.Bin))
+			for cmd := range m.Bin {
+				cmds = append(cmds, cmd)
+			}
+			sort.Strings(cmds)
+			for _, cmd := range cmds {
+				entries = append(entries, entry{
+					command: cmd,
+					pkgName: m.Name,
+					source:  source,
+					script:  m.Bin[cmd],
+				})
+			}
+		}
+	}
+
+	if isProjectDir() {
+		wd, _ := os.Getwd()
+		scanPackagesDir(filepath.Join(wd, ".fglpkg", "packages"), "local")
+	}
+	globalHome, err := fglpkgHome()
+	if err == nil {
+		scanPackagesDir(filepath.Join(globalHome, "packages"), "global")
+	}
+
+	if len(entries) == 0 {
+		fmt.Println("No commands available.")
+		fmt.Println("Packages can define commands via the \"bin\" field in fglpkg.json")
+		return nil
+	}
+
+	fmt.Println("Available commands:")
+	fmt.Printf("  %-20s %-20s %-10s %s\n", "COMMAND", "PACKAGE", "SOURCE", "SCRIPT")
+	fmt.Printf("  %-20s %-20s %-10s %s\n", "-------", "-------", "------", "------")
+	for _, e := range entries {
+		fmt.Printf("  %-20s %-20s %-10s %s\n", e.command, e.pkgName, e.source, e.script)
+	}
+	return nil
+}
+
+// findBinCommand scans installed packages (local first, then global) for
+// a bin command matching the given name. Returns the full path to the
+// script and the owning package name.
+func findBinCommand(commandName string) (scriptPath, pkgName string, err error) {
+	type match struct {
+		scriptPath string
+		pkgName    string
+	}
+	var matches []match
+
+	scanPackagesDir := func(packagesDir string) {
+		entries, readErr := os.ReadDir(packagesDir)
+		if readErr != nil {
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			pkgDir := filepath.Join(packagesDir, e.Name())
+			m, loadErr := manifest.Load(pkgDir)
+			if loadErr != nil {
+				continue
+			}
+			if scriptRel, ok := m.Bin[commandName]; ok {
+				fullPath := filepath.Join(pkgDir, scriptRel)
+				if _, statErr := os.Stat(fullPath); statErr == nil {
+					matches = append(matches, match{
+						scriptPath: fullPath,
+						pkgName:    m.Name,
+					})
+				}
+			}
+		}
+	}
+
+	globalHome, homeErr := fglpkgHome()
+	globalPkgs := ""
+	if homeErr == nil {
+		globalPkgs = filepath.Join(globalHome, "packages")
+	}
+
+	// Scan local packages first (higher priority).
+	if isProjectDir() {
+		wd, _ := os.Getwd()
+		localPkgs := filepath.Join(wd, ".fglpkg", "packages")
+		scanPackagesDir(localPkgs)
+		// Scan global if different from local.
+		if globalPkgs != "" && globalPkgs != localPkgs {
+			scanPackagesDir(globalPkgs)
+		}
+	} else if globalPkgs != "" {
+		scanPackagesDir(globalPkgs)
+	}
+
+	if len(matches) == 0 {
+		return "", "", fmt.Errorf("command %q not found in any installed package\nRun 'fglpkg run --list' to see available commands", commandName)
+	}
+	if len(matches) > 1 {
+		var names []string
+		for _, m := range matches {
+			names = append(names, m.pkgName)
+		}
+		return "", "", fmt.Errorf("command %q is defined by multiple packages: %s\nRemove or rename conflicting packages to resolve", commandName, strings.Join(names, ", "))
+	}
+
+	return matches[0].scriptPath, matches[0].pkgName, nil
+}
+
+// ─── docs ────────────────────────────────────────────────────────────────────
+
+func cmdDocs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: fglpkg docs <package> [file]")
+	}
+
+	pkgName := args[0]
+
+	pkgDir, err := findInstalledPackage(pkgName)
+	if err != nil {
+		return err
+	}
+
+	m, err := manifest.Load(pkgDir)
+	if err != nil {
+		return fmt.Errorf("cannot load manifest for %s: %w", pkgName, err)
+	}
+
+	if len(m.Docs) == 0 {
+		fmt.Printf("Package %q does not declare any documentation files.\n", pkgName)
+		return nil
+	}
+
+	docFiles, err := collectDocFiles(pkgDir, m.Docs)
+	if err != nil {
+		return err
+	}
+
+	if len(docFiles) == 0 {
+		fmt.Printf("Package %q declares doc patterns but no matching files were found.\n", pkgName)
+		return nil
+	}
+
+	// If no specific file requested, list available docs.
+	if len(args) < 2 {
+		fmt.Printf("Documentation for %s@%s:\n", m.Name, m.Version)
+		for _, f := range docFiles {
+			fmt.Printf("  %s\n", f)
+		}
+		fmt.Printf("\nView a file: fglpkg docs %s <file>\n", pkgName)
+		return nil
+	}
+
+	// Display a specific doc file.
+	requestedFile := args[1]
+
+	var matchPath string
+	for _, f := range docFiles {
+		if f == requestedFile || filepath.Base(f) == requestedFile {
+			matchPath = f
+			break
+		}
+	}
+	if matchPath == "" {
+		return fmt.Errorf("doc file %q not found in package %s\nRun 'fglpkg docs %s' to list available files", requestedFile, pkgName, pkgName)
+	}
+
+	fullPath := filepath.Join(pkgDir, matchPath)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", matchPath, err)
+	}
+	fmt.Print(string(content))
+	return nil
+}
+
+// findInstalledPackage looks for a package by name, checking local then global.
+func findInstalledPackage(name string) (string, error) {
+	if isProjectDir() {
+		wd, _ := os.Getwd()
+		localDir := filepath.Join(wd, ".fglpkg", "packages", name)
+		if _, err := os.Stat(localDir); err == nil {
+			return localDir, nil
+		}
+	}
+	globalHome, err := fglpkgHome()
+	if err == nil {
+		globalDir := filepath.Join(globalHome, "packages", name)
+		if _, err := os.Stat(globalDir); err == nil {
+			return globalDir, nil
+		}
+	}
+	return "", fmt.Errorf("package %q is not installed\nRun 'fglpkg install %s' first", name, name)
+}
+
+// collectDocFiles walks the package directory and returns paths (relative to
+// pkgDir) of all files matching any of the given glob patterns.
+func collectDocFiles(pkgDir string, patterns []string) ([]string, error) {
+	var files []string
+	seen := make(map[string]bool)
+
+	err := filepath.Walk(pkgDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		relPath, relErr := filepath.Rel(pkgDir, path)
+		if relErr != nil {
+			return nil
+		}
+		if seen[relPath] {
+			return nil
+		}
+		for _, pattern := range patterns {
+			if matchGlob(pattern, relPath) {
+				files = append(files, relPath)
+				seen[relPath] = true
+				break
+			}
+		}
+		return nil
+	})
+	return files, err
+}
+
 // ─── Auth HTTP helpers ────────────────────────────────────────────────────────
 
 func whoamiRequest(registryURL, token string) (string, error) {
@@ -1133,6 +1480,8 @@ COMMANDS:
   token             Manage user tokens (admin)
   config            Manage registry configuration (GitHub repos)
   workspace         Manage monorepo workspaces
+  run <command>     Run a script from an installed package
+  docs <package>    List or view package documentation
   version           Print fglpkg version
   help              Show this help
 
@@ -1230,6 +1579,47 @@ func filepathBase() string {
 		}
 	}
 	return dir
+}
+
+// matchGlob matches a path against a glob pattern, with support for "**"
+// to match any number of directory levels.  For simple patterns (no "**")
+// it also tries matching just the file's basename.
+func matchGlob(pattern, path string) bool {
+	// Normalise separators.
+	pattern = filepath.ToSlash(pattern)
+	path = filepath.ToSlash(path)
+
+	if !strings.Contains(pattern, "**") {
+		if matched, _ := filepath.Match(pattern, path); matched {
+			return true
+		}
+		matched, _ := filepath.Match(pattern, filepath.Base(path))
+		return matched
+	}
+
+	// Split on the first "**" occurrence.
+	parts := strings.SplitN(pattern, "**", 2)
+	prefix := strings.TrimRight(parts[0], "/")
+	suffix := strings.TrimLeft(parts[1], "/")
+
+	// Check prefix: the path must start with the prefix directory (if any).
+	if prefix != "" {
+		if !strings.HasPrefix(path, prefix+"/") && path != prefix {
+			return false
+		}
+	}
+
+	if suffix == "" {
+		return true
+	}
+
+	// The remaining path (after prefix) must end with a segment matching suffix.
+	remaining := path
+	if prefix != "" {
+		remaining = strings.TrimPrefix(path, prefix+"/")
+	}
+	matched, _ := filepath.Match(suffix, filepath.Base(remaining))
+	return matched
 }
 
 // promptWithDefault prints a prompt and reads a full line from stdin,

@@ -192,6 +192,8 @@ eval "$(fglpkg env --global)"
 | `genero` | No | Genero BDL version constraint (e.g., `^4.0.0`) |
 | `root` | No | Base directory for package files when publishing (default `.`) |
 | `files` | No | Glob patterns for files to include in the zip (default `["*.42m", "*.42f", "*.sch"]`) |
+| `bin` | No | Command name to script path mappings (e.g., `{"migrate": "scripts/migrate.sh"}`) |
+| `docs` | No | Glob patterns for documentation files to include (e.g., `["README.md", "docs/**/*.md"]`) |
 | `dependencies.fgl` | No | BDL package dependencies (`name` -> `version constraint`) |
 | `dependencies.java` | No | Java JAR dependencies (Maven coordinates) |
 | `scripts` | No | Custom script definitions |
@@ -256,6 +258,14 @@ fglpkg workspace init [paths...]         # Initialise a monorepo workspace
 fglpkg workspace add <path>              # Add a member to the workspace
 fglpkg workspace list                    # List workspace members
 fglpkg workspace info                    # Show workspace details
+
+# Scripts (bin)
+fglpkg run --list                        # List all available commands
+fglpkg run <command> [-- args...]        # Run a script from an installed package
+
+# Documentation
+fglpkg docs <package>                    # List documentation files
+fglpkg docs <package> <file>             # Display a documentation file
 
 # Misc
 fglpkg version                           # Print version and build info

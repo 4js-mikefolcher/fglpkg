@@ -11,6 +11,8 @@ This guide covers the day-to-day usage of fglpkg, the package manager for Genero
 - [Managing Dependencies](#managing-dependencies)
 - [Publishing a Package](#publishing-a-package)
 - [Working with Java JARs](#working-with-java-jars)
+- [Distributable Scripts](#distributable-scripts)
+- [Package Documentation](#package-documentation)
 - [Registry Authentication](#registry-authentication)
 - [Workspaces (Monorepos)](#workspaces-monorepos)
 - [Lock Files](#lock-files)
@@ -441,6 +443,110 @@ Genero BDL can call Java code, so fglpkg also manages JAR dependencies. Declare 
 | `url` | Override the download URL entirely (default: Maven Central) |
 
 JARs are downloaded to `~/.fglpkg/jars/` and added to `CLASSPATH` by `fglpkg env`.
+
+## Distributable Scripts
+
+Packages can ship executable scripts (bash, python, etc.) that consumers can run after installation. Declare them using the `bin` field in `fglpkg.json`:
+
+```json
+{
+  "name": "dbtools",
+  "version": "1.0.0",
+  "bin": {
+    "db-migrate": "scripts/migrate.sh",
+    "db-seed": "scripts/seed.py"
+  }
+}
+```
+
+Each key is the command name and each value is the path to the script file (relative to the package `root`). Script files are automatically included in the package zip when publishing, even if they don't match the `files` patterns.
+
+After installation, scripts are automatically made executable (on Unix). Run them with `fglpkg run`:
+
+```bash
+# List all available commands from installed packages
+$ fglpkg run --list
+Available commands:
+  COMMAND              PACKAGE              SOURCE     SCRIPT
+  -------              -------              ------     ------
+  db-migrate           dbtools              global     scripts/migrate.sh
+  db-seed              dbtools              global     scripts/seed.py
+
+# Run a command
+$ fglpkg run db-migrate
+
+# Pass arguments to the script (use -- to separate)
+$ fglpkg run db-migrate -- --up --env production
+```
+
+### How It Works
+
+- `fglpkg run` scans installed packages (local first, then global) to find the named command
+- If the same command name exists in multiple packages, an error is reported listing the conflicts
+- On Unix, scripts are executed directly (relying on the shebang line, e.g., `#!/bin/bash`)
+- On Windows, scripts are executed via `cmd.exe` or the appropriate interpreter based on file extension
+
+### Writing Portable Scripts
+
+For maximum compatibility, include a shebang line at the top of your scripts:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+echo "Running migration..."
+```
+
+```python
+#!/usr/bin/env python3
+import sys
+print("Seeding database...")
+```
+
+## Package Documentation
+
+Packages can include documentation files that consumers can browse after installation. Declare them using the `docs` field with glob patterns:
+
+```json
+{
+  "name": "poiapi",
+  "version": "1.0.0",
+  "docs": ["README.md", "docs/**/*.md"]
+}
+```
+
+Documentation is only included when the author explicitly declares the `docs` field — there are no default patterns. The glob patterns support `**` for matching any number of directory levels.
+
+### Browsing Documentation
+
+Use `fglpkg docs` to discover and read documentation for installed packages:
+
+```bash
+# List available documentation files
+$ fglpkg docs poiapi
+Documentation for poiapi@1.0.0:
+  README.md
+  docs/getting-started.md
+  docs/api-reference.md
+
+View a file: fglpkg docs poiapi <file>
+
+# Display a specific file
+$ fglpkg docs poiapi README.md
+
+# You can also use just the filename (if unique)
+$ fglpkg docs poiapi api-reference.md
+```
+
+### Docs Glob Patterns
+
+The `docs` field supports standard glob syntax with `**` for recursive matching:
+
+| Pattern | Matches |
+|---|---|
+| `README.md` | Only `README.md` in the package root |
+| `*.md` | Any `.md` file in the package root |
+| `docs/**/*.md` | Any `.md` file anywhere under `docs/` |
+| `CHANGELOG.md` | Only `CHANGELOG.md` in the package root |
 
 ## Registry Authentication
 
