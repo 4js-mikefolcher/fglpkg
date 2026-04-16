@@ -50,17 +50,24 @@ sudo chmod +x /usr/local/bin/fglpkg
 copy fglpkg-windows-amd64.exe C:\tools\fglpkg.exe
 ```
 
-Add environment setup to your shell profile:
+Add environment setup:
+
+**macOS / Linux** — add to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
-# macOS / Linux — add to ~/.bashrc or ~/.zshrc
 echo 'eval "$(fglpkg env --global)"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Use `--global` in your shell profile so it always includes all globally installed packages regardless of your current directory.
+**Windows (cmd.exe)** — create a `setup-env.bat` script or run before building:
 
-On Windows, run `fglpkg env --global` and set the displayed variables manually, or use the `SET` output format that fglpkg generates on Windows.
+```cmd
+FOR /F "tokens=*" %%i IN ('fglpkg env --global') DO %%i
+```
+
+**Genero Studio** — paste the output of `fglpkg env --gst` into your project's environment settings.
+
+Use `--global` in shell profiles so all installed packages are available regardless of your current directory.
 
 ## Building from Source
 
@@ -166,6 +173,7 @@ eval "$(fglpkg env --global)"
   "root": "com/fourjs/poiapi",
   "genero": "^4.0.0",
   "main": "PoiApi.42m",
+  "programs": ["PoiConvert", "PoiMerge"],
   "dependencies": {
     "java": [
       {
@@ -196,6 +204,7 @@ eval "$(fglpkg env --global)"
 | `docs` | No | Glob patterns for documentation files to include (e.g., `["README.md", "docs/**/*.md"]`) |
 | `dependencies.fgl` | No | BDL package dependencies (`name` -> `version constraint`) |
 | `dependencies.java` | No | Java JAR dependencies (Maven coordinates) |
+| `programs` | No | List of module names with MAIN blocks (e.g., `["PoiConvert"]`) |
 | `scripts` | No | Custom script definitions |
 
 ## Environment Variables
@@ -228,6 +237,8 @@ fglpkg env                               # Print export statements (auto-detects
 fglpkg env --global                      # Print exports for all global packages
 fglpkg env --gst                         # Print in Genero Studio format
 fglpkg search json                       # Search registry
+fglpkg bdl <pkg> <module> [args...]      # Run a BDL program from a package
+fglpkg bdl --list                        # List available BDL programs
 
 # Publishing
 fglpkg publish                           # Publish current package to registry

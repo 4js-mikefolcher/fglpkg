@@ -31,7 +31,8 @@ type Manifest struct {
 	Root             string            `json:"root,omitempty"`  // base directory for package files (default ".")
 	Files            []string          `json:"files,omitempty"` // glob patterns for package zip
 	Bin              map[string]string `json:"bin,omitempty"`   // command name -> script path
-	Docs             []string          `json:"docs,omitempty"`  // glob patterns for doc files
+	Docs             []string          `json:"docs,omitempty"`     // glob patterns for doc files
+	Programs         []string          `json:"programs,omitempty"` // modules with MAIN blocks (e.g. "PoiConvert")
 	Scripts          map[string]string `json:"scripts,omitempty"`
 }
 

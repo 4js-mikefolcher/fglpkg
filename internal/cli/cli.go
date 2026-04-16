@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -81,6 +82,8 @@ func Execute() error {
 		return cmdWorkspace(args)
 	case "run":
 		return cmdRun(args)
+	case "bdl":
+		return cmdBdl(args)
 	case "docs":
 		return cmdDocs(args)
 	case "version":
@@ -593,6 +596,179 @@ func addFileToZip(zw *zip.Writer, diskPath, zipPath string) error {
 	}
 	_, err = io.Copy(fw, f)
 	return err
+}
+
+// ─── bdl ──────────────────────────────────────────────────────────────────────
+
+func cmdBdl(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: fglpkg bdl <package> <module> [args...]\n       fglpkg bdl --list")
+	}
+
+	if args[0] == "--list" || args[0] == "-l" {
+		return cmdBdlList()
+	}
+
+	if len(args) < 2 {
+		return fmt.Errorf("usage: fglpkg bdl <package> <module> [args...]")
+	}
+
+	pkgName := args[0]
+	moduleName := args[1]
+	programArgs := args[2:]
+
+	// Find the package.
+	pkgDir, m, err := findInstalledPackage(pkgName)
+	if err != nil {
+		return err
+	}
+
+	// Verify the module is declared in programs.
+	found := false
+	for _, p := range m.Programs {
+		if p == moduleName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		available := "none"
+		if len(m.Programs) > 0 {
+			available = strings.Join(m.Programs, ", ")
+		}
+		return fmt.Errorf("module %q is not declared in %s's programs list\nAvailable programs: %s", moduleName, pkgName, available)
+	}
+
+	// Derive the working directory from root.
+	workDir := pkgDir
+	if m.Root != "" {
+		workDir = filepath.Join(pkgDir, m.Root)
+	}
+	if _, err := os.Stat(workDir); err != nil {
+		return fmt.Errorf("program directory not found: %s\nTry reinstalling: fglpkg install", workDir)
+	}
+
+	// Verify the .42m file exists.
+	modulePath := filepath.Join(workDir, moduleName+".42m")
+	if _, err := os.Stat(modulePath); err != nil {
+		return fmt.Errorf("module file not found: %s", modulePath)
+	}
+
+	// Find fglrun.
+	fglrunPath, err := genero.FglrunPath()
+	if err != nil {
+		return err
+	}
+
+	// Build the environment.
+	home, err := fglpkgHome()
+	if err != nil {
+		return err
+	}
+	g := env.New(home)
+
+	fglldpath, err := g.BuildFGLLDPATH()
+	if err != nil {
+		return err
+	}
+	classpath, err := g.BuildJavaClasspath()
+	if err != nil {
+		return err
+	}
+
+	// Merge with existing env values.
+	fglldpath = env.MergeEnvVar(fglldpath, os.Getenv("FGLLDPATH"))
+	classpath = env.MergeEnvVar(classpath, os.Getenv("CLASSPATH"))
+
+	// Build the full environment, replacing FGLLDPATH and CLASSPATH.
+	cmdEnv := os.Environ()
+	cmdEnv = setEnvVar(cmdEnv, "FGLLDPATH", fglldpath)
+	if classpath != "" {
+		cmdEnv = setEnvVar(cmdEnv, "CLASSPATH", classpath)
+	}
+
+	// Execute fglrun.
+	cmd := exec.Command(fglrunPath, append([]string{moduleName}, programArgs...)...)
+	cmd.Dir = workDir
+	cmd.Env = cmdEnv
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		return fmt.Errorf("fglrun failed: %w", err)
+	}
+	return nil
+}
+
+func cmdBdlList() error {
+	type entry struct {
+		Program string
+		Package string
+		Source  string
+	}
+	var entries []entry
+
+	scanPackages := func(dir, source string) {
+		pkgEntries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range pkgEntries {
+			if !e.IsDir() {
+				continue
+			}
+			m, err := manifest.Load(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			for _, p := range m.Programs {
+				entries = append(entries, entry{Program: p, Package: m.Name, Source: source})
+			}
+		}
+	}
+
+	// Local packages first.
+	wd, _ := os.Getwd()
+	localPkgs := filepath.Join(wd, ".fglpkg", "packages")
+	scanPackages(localPkgs, "local")
+
+	// Global packages.
+	home, err := fglpkgHome()
+	if err == nil {
+		globalPkgs := filepath.Join(home, "packages")
+		if globalPkgs != localPkgs {
+			scanPackages(globalPkgs, "global")
+		}
+	}
+
+	if len(entries) == 0 {
+		fmt.Println("No BDL programs found in installed packages.")
+		return nil
+	}
+
+	fmt.Println("Available BDL programs:")
+	fmt.Printf("  %-25s %-25s %s\n", "PROGRAM", "PACKAGE", "SOURCE")
+	fmt.Printf("  %-25s %-25s %s\n", "-------", "-------", "------")
+	for _, e := range entries {
+		fmt.Printf("  %-25s %-25s %s\n", e.Program, e.Package, e.Source)
+	}
+	return nil
+}
+
+// setEnvVar replaces or appends a KEY=VALUE pair in an environment slice.
+func setEnvVar(environ []string, key, value string) []string {
+	prefix := key + "="
+	for i, e := range environ {
+		if strings.HasPrefix(e, prefix) {
+			environ[i] = prefix + value
+			return environ
+		}
+	}
+	return append(environ, prefix+value)
 }
 
 // ─── unpublish ────────────────────────────────────────────────────────────────
@@ -1141,12 +1317,50 @@ func cmdRun(args []string) error {
 
 	fmt.Printf("Running %q from package %s...\n", commandName, pkgName)
 
-	cmd := exec.Command(scriptPath, scriptArgs...)
+	cmd, err := buildScriptCommand(scriptPath, scriptArgs)
+	if err != nil {
+		return err
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
+}
+
+// buildScriptCommand creates an exec.Cmd appropriate for the current OS.
+// On Unix, the script is executed directly (relying on the shebang line).
+// On Windows, the interpreter is selected based on the file extension.
+func buildScriptCommand(scriptPath string, args []string) (*exec.Cmd, error) {
+	if runtime.GOOS != "windows" {
+		return exec.Command(scriptPath, args...), nil
+	}
+
+	ext := strings.ToLower(filepath.Ext(scriptPath))
+	switch ext {
+	case ".bat", ".cmd":
+		// Native Windows batch — run via cmd.exe /C.
+		cmdArgs := append([]string{"/C", scriptPath}, args...)
+		return exec.Command("cmd.exe", cmdArgs...), nil
+	case ".ps1":
+		// PowerShell script.
+		cmdArgs := append([]string{"-ExecutionPolicy", "Bypass", "-File", scriptPath}, args...)
+		return exec.Command("powershell.exe", cmdArgs...), nil
+	case ".py":
+		cmdArgs := append([]string{scriptPath}, args...)
+		return exec.Command("python", cmdArgs...), nil
+	case ".sh":
+		cmdArgs := append([]string{scriptPath}, args...)
+		return exec.Command("bash", cmdArgs...), nil
+	case ".exe":
+		return exec.Command(scriptPath, args...), nil
+	default:
+		return nil, fmt.Errorf(
+			"cannot run %q on Windows: unsupported file extension %q\n"+
+				"Supported extensions: .bat, .cmd, .ps1, .py, .sh, .exe",
+			filepath.Base(scriptPath), ext,
+		)
+	}
 }
 
 func cmdRunList() error {
@@ -1291,14 +1505,9 @@ func cmdDocs(args []string) error {
 
 	pkgName := args[0]
 
-	pkgDir, err := findInstalledPackage(pkgName)
+	pkgDir, m, err := findInstalledPackage(pkgName)
 	if err != nil {
 		return err
-	}
-
-	m, err := manifest.Load(pkgDir)
-	if err != nil {
-		return fmt.Errorf("cannot load manifest for %s: %w", pkgName, err)
 	}
 
 	if len(m.Docs) == 0 {
@@ -1316,8 +1525,17 @@ func cmdDocs(args []string) error {
 		return nil
 	}
 
-	// If no specific file requested, list available docs.
+	// If no specific file requested and there's only one doc, show it directly.
 	if len(args) < 2 {
+		if len(docFiles) == 1 {
+			fullPath := filepath.Join(pkgDir, docFiles[0])
+			content, err := os.ReadFile(fullPath)
+			if err != nil {
+				return fmt.Errorf("cannot read %s: %w", docFiles[0], err)
+			}
+			fmt.Print(string(content))
+			return nil
+		}
 		fmt.Printf("Documentation for %s@%s:\n", m.Name, m.Version)
 		for _, f := range docFiles {
 			fmt.Printf("  %s\n", f)
@@ -1350,22 +1568,23 @@ func cmdDocs(args []string) error {
 }
 
 // findInstalledPackage looks for a package by name, checking local then global.
-func findInstalledPackage(name string) (string, error) {
+// Returns the package directory, its manifest, and an error.
+func findInstalledPackage(name string) (string, *manifest.Manifest, error) {
 	if isProjectDir() {
 		wd, _ := os.Getwd()
 		localDir := filepath.Join(wd, ".fglpkg", "packages", name)
-		if _, err := os.Stat(localDir); err == nil {
-			return localDir, nil
+		if m, err := manifest.Load(localDir); err == nil {
+			return localDir, m, nil
 		}
 	}
 	globalHome, err := fglpkgHome()
 	if err == nil {
 		globalDir := filepath.Join(globalHome, "packages", name)
-		if _, err := os.Stat(globalDir); err == nil {
-			return globalDir, nil
+		if m, err := manifest.Load(globalDir); err == nil {
+			return globalDir, m, nil
 		}
 	}
-	return "", fmt.Errorf("package %q is not installed\nRun 'fglpkg install %s' first", name, name)
+	return "", nil, fmt.Errorf("package %q is not installed\nRun 'fglpkg install %s' first", name, name)
 }
 
 // collectDocFiles walks the package directory and returns paths (relative to
@@ -1471,6 +1690,7 @@ COMMANDS:
   list              List installed packages
   env               Print environment variable exports
   search <term>     Search the registry
+  bdl <pkg> <mod>   Run a BDL program from an installed package
   publish           Publish current package to registry
   unpublish <p>@<v> Remove a published version from registry + GitHub
   login             Save registry credentials
@@ -1501,10 +1721,19 @@ ENVIRONMENT:
   FGLPKG_GITHUB_REPO     GitHub owner/repo for package storage
   FGLPKG_GENERO_VERSION  Override Genero version detection
 
-SETUP:
+`)
+	if runtime.GOOS == "windows" {
+		fmt.Print(`SETUP:
+  PowerShell:    fglpkg env --global | Invoke-Expression
+  Command Prompt: run "fglpkg env --global" and set the displayed variables
+
+`)
+	} else {
+		fmt.Print(`SETUP:
   Add to ~/.bashrc:  eval "$(fglpkg env --global)"
 
 `)
+	}
 }
 
 func fglpkgHome() (string, error) {
@@ -1515,7 +1744,7 @@ func fglpkgHome() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
-	return home + "/.fglpkg", nil
+	return filepath.Join(home, ".fglpkg"), nil
 }
 
 // resolveGitHubRepo returns the GitHub owner/repo for package storage.

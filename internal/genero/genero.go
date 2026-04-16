@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
@@ -56,7 +57,7 @@ func Detect() (Version, error) {
 		}
 
 		// 4. $FGLDIR/bin/fglcomp --version.
-		if v, err := fromCommand(filepath.Join(fgldir, "bin", "fglcomp"), "--version"); err == nil {
+		if v, err := fromCommand(fglcompPath(fgldir), "--version"); err == nil {
 			return v, nil
 		}
 	}
@@ -104,6 +105,35 @@ func (v Version) Satisfies(constraint string) (bool, error) {
 }
 
 // ─── Detection helpers ────────────────────────────────────────────────────────
+
+// fglcompPath returns the full path to the fglcomp executable under fgldir,
+// appending ".exe" on Windows where explicit paths require the extension.
+func fglcompPath(fgldir string) string {
+	name := "fglcomp"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(fgldir, "bin", name)
+}
+
+// FglrunPath returns the path to the fglrun binary. It checks PATH first,
+// then falls back to $FGLDIR/bin/fglrun.
+func FglrunPath() (string, error) {
+	if p, err := exec.LookPath("fglrun"); err == nil {
+		return p, nil
+	}
+	if fgldir := os.Getenv("FGLDIR"); fgldir != "" {
+		name := "fglrun"
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		p := filepath.Join(fgldir, "bin", name)
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("fglrun not found: ensure Genero BDL is installed and either fglrun is on your PATH or $FGLDIR is set")
+}
 
 // versionPattern matches Genero version strings embedded in command output.
 // Handles formats like:

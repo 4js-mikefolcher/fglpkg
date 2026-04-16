@@ -250,6 +250,30 @@ func (g *Generator) buildGSTPaths(dir string, isDirs bool) (string, error) {
 	return strings.Join(parts, ";"), nil
 }
 
+// BuildFGLLDPATH returns the raw FGLLDPATH value (no export prefix).
+// Useful for programmatically setting the environment (e.g., fglpkg bdl).
+func (g *Generator) BuildFGLLDPATH() (string, error) {
+	return g.buildFGLLDPATH()
+}
+
+// BuildJavaClasspath returns the raw CLASSPATH value (no export prefix).
+func (g *Generator) BuildJavaClasspath() (string, error) {
+	return g.buildJavaClasspath()
+}
+
+// MergeEnvVar prepends fglpkgValue to existingValue using the OS path
+// separator. Returns just fglpkgValue if existingValue is empty, and
+// vice versa.
+func MergeEnvVar(fglpkgValue, existingValue string) string {
+	if fglpkgValue == "" {
+		return existingValue
+	}
+	if existingValue == "" {
+		return fglpkgValue
+	}
+	return fglpkgValue + pathSeparator() + existingValue
+}
+
 // prependExportLine emits a shell statement that prepends value to the
 // existing variable, so that user/system entries are never lost.
 //

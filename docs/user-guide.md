@@ -75,13 +75,15 @@ sudo cp fglpkg /usr/local/bin/
 
 ## Setting Up Your Environment
 
-fglpkg manages the `FGLLDPATH` and `CLASSPATH` environment variables so Genero can find installed packages and JARs. Add this line to your shell profile (`~/.bashrc`, `~/.zshrc`, or equivalent):
+fglpkg manages the `FGLLDPATH` and `CLASSPATH` environment variables so Genero can find installed packages and JARs.
+
+### macOS / Linux
+
+Add to your shell profile (`~/.bashrc`, `~/.zshrc`, or equivalent):
 
 ```bash
 eval "$(fglpkg env --global)"
 ```
-
-Use `--global` in your shell profile so it always includes all globally installed packages, regardless of your current directory.
 
 Then reload your shell:
 
@@ -89,24 +91,51 @@ Then reload your shell:
 source ~/.bashrc
 ```
 
-Running `fglpkg env` shows the export statements it generates. The output varies depending on context:
+Use `--global` in your shell profile so it always includes all globally installed packages, regardless of your current directory.
 
-```bash
-# Inside a project directory (with fglpkg.json or .fglpkg/) — shows local packages
-$ fglpkg env
-export FGLLDPATH=/path/to/project/.fglpkg/packages/poiapi"${FGLLDPATH:+:$FGLLDPATH}"
-export CLASSPATH=/path/to/project/.fglpkg/jars/poi-5.2.3.jar"${CLASSPATH:+:$CLASSPATH}"
+### Windows (cmd.exe)
 
-# With --global — shows all globally installed packages
-$ fglpkg env --global
-export FGLLDPATH=/Users/you/.fglpkg/packages/myutils:/Users/you/.fglpkg/packages/poiapi"${FGLLDPATH:+:$FGLLDPATH}"
-export CLASSPATH=/Users/you/.fglpkg/jars/poi-5.2.3.jar:/Users/you/.fglpkg/jars/gson-2.10.1.jar"${CLASSPATH:+:$CLASSPATH}"
+Run before building, or add to a `setup-env.bat` script:
 
-# With --gst — Genero Studio format (always local, uses $(ProjectDir))
-$ fglpkg env --gst
+```cmd
+@echo off
+FOR /F "tokens=*" %%i IN ('fglpkg env --global') DO %%i
+```
+
+To run directly at the command prompt (single `%`):
+
+```cmd
+FOR /F "tokens=*" %i IN ('fglpkg env --global') DO %i
+```
+
+On Windows, `fglpkg env` outputs `SET` commands:
+
+```
+SET FGLLDPATH=C:\Users\you\.fglpkg\packages\poiapi;%FGLLDPATH%
+SET CLASSPATH=C:\Users\you\.fglpkg\jars\poi-5.2.3.jar;%CLASSPATH%
+```
+
+### Genero Studio
+
+Run `fglpkg env --gst` and paste the output into your project's environment variable settings:
+
+```
 FGLLDPATH=$(ProjectDir)/.fglpkg/packages/poiapi;$(FGLLDPATH)
 CLASSPATH=$(ProjectDir)/.fglpkg/jars/poi-5.2.3.jar;$(CLASSPATH)
 ```
+
+Genero Studio translates `$(ProjectDir)` to the actual project path and `;` to the platform-specific separator automatically.
+
+### Environment Output Modes
+
+`fglpkg env` varies its output depending on context and flags:
+
+| Command | Scope | Format | Use case |
+|---|---|---|---|
+| `fglpkg env` | Auto (local if in project) | Shell (Unix) or SET (Windows) | Project-specific builds |
+| `fglpkg env --global` | All global packages | Shell (Unix) or SET (Windows) | Shell profile setup |
+| `fglpkg env --local` | Local `.fglpkg/` only | Shell (Unix) or SET (Windows) | Force local scope |
+| `fglpkg env --gst` | Local `.fglpkg/` only | Genero Studio format | Genero Studio projects |
 
 Key points:
 - Existing `FGLLDPATH` and `CLASSPATH` values are preserved (fglpkg prepends its paths)
@@ -118,7 +147,13 @@ Key points:
 Everything fglpkg manages lives under `~/.fglpkg` by default. Override this by setting the `FGLPKG_HOME` environment variable:
 
 ```bash
+# macOS / Linux
 export FGLPKG_HOME=/opt/fglpkg
+```
+
+```cmd
+REM Windows
+SET FGLPKG_HOME=C:\fglpkg
 ```
 
 ## Creating a New Project
@@ -410,6 +445,52 @@ Supported constraint syntax:
 - `^3.20.0 || ^4.0.0` — multiple ranges
 - `*` or omit — compatible with any version
 
+## Running BDL Programs
+
+Packages can declare runnable BDL programs — modules that contain a `MAIN` block. These are listed in the `programs` field of `fglpkg.json`:
+
+```json
+{
+  "name": "poiapi",
+  "version": "1.0.0",
+  "root": "com/fourjs/poiapi",
+  "programs": ["PoiConvert", "PoiMerge"]
+}
+```
+
+### Running a program
+
+```bash
+fglpkg bdl poiapi PoiConvert input.xlsx output.pdf
+```
+
+This:
+1. Finds the `poiapi` package in installed packages (local first, then global)
+2. Verifies `PoiConvert` is declared in the package's `programs` list
+3. Derives the working directory from the package's `root` field (`com/fourjs/poiapi/`)
+4. Sets up `FGLLDPATH` and `CLASSPATH` with all installed packages
+5. Runs `fglrun PoiConvert input.xlsx output.pdf` from that directory
+
+All arguments after the module name are passed through to `fglrun`.
+
+### Listing available programs
+
+```bash
+$ fglpkg bdl --list
+Available BDL programs:
+  PROGRAM                   PACKAGE                   SOURCE
+  -------                   -------                   ------
+  PoiConvert                poiapi                    local
+  PoiMerge                  poiapi                    local
+```
+
+### Requirements
+
+- Genero BDL must be installed (`fglrun` on `PATH` or `$FGLDIR` set)
+- The package must be installed (`fglpkg install`)
+- The module must be declared in the package's `programs` list
+- The `.42m` file must exist in the package's `root` directory
+
 ## Working with Java JARs
 
 Genero BDL can call Java code, so fglpkg also manages JAR dependencies. Declare them using Maven coordinates:
@@ -581,8 +662,16 @@ fglpkg logout
 For CI/CD environments, set tokens as environment variables instead of using `fglpkg login`:
 
 ```bash
+# macOS / Linux
 export FGLPKG_PUBLISH_TOKEN=my-secret-token
 export FGLPKG_GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+fglpkg publish
+```
+
+```cmd
+REM Windows
+SET FGLPKG_PUBLISH_TOKEN=my-secret-token
+SET FGLPKG_GITHUB_TOKEN=ghp_xxxxxxxxxxxx
 fglpkg publish
 ```
 
@@ -591,7 +680,14 @@ The GitHub repo is automatically fetched from the registry config. Override it w
 For install-only CI jobs, only the GitHub token is needed:
 
 ```bash
+# macOS / Linux
 export FGLPKG_GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+fglpkg install
+```
+
+```cmd
+REM Windows
+SET FGLPKG_GITHUB_TOKEN=ghp_xxxxxxxxxxxx
 fglpkg install
 ```
 
@@ -701,13 +797,23 @@ Or set the `FGLPKG_PUBLISH_TOKEN` environment variable.
 
 ### Packages not found by Genero after install
 
-Make sure your shell profile includes the `eval` line:
+Make sure your environment is set up:
+
+**macOS / Linux** — your shell profile should include:
 
 ```bash
-eval "$(fglpkg env)"
+eval "$(fglpkg env --global)"
 ```
 
 Restart your shell or run `source ~/.bashrc` after adding it.
+
+**Windows (cmd.exe)** — run before building:
+
+```cmd
+FOR /F "tokens=*" %i IN ('fglpkg env --global') DO %i
+```
+
+**Genero Studio** — paste the output of `fglpkg env --gst` into your project's environment settings.
 
 ### Stale lock file
 
@@ -722,7 +828,14 @@ fglpkg update
 Override the detected version:
 
 ```bash
+# macOS / Linux
 export FGLPKG_GENERO_VERSION=4.1.0
+fglpkg install
+```
+
+```cmd
+REM Windows
+SET FGLPKG_GENERO_VERSION=4.1.0
 fglpkg install
 ```
 
@@ -731,10 +844,16 @@ fglpkg install
 Point fglpkg at your registry:
 
 ```bash
+# macOS / Linux
 export FGLPKG_REGISTRY=https://registry.example.com
 ```
 
-Add this to your shell profile for persistence.
+```cmd
+REM Windows
+SET FGLPKG_REGISTRY=https://registry.example.com
+```
+
+Add this to your shell profile or batch script for persistence.
 
 ### Checking the installed version
 
