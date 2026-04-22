@@ -8,7 +8,7 @@
 //
 //	{
 //	  "registries": {
-//	    "https://registry.fglpkg.dev": {
+//	    "https://fglpkg-registry.fly.dev": {
 //	      "token": "<raw token>",
 //	      "username": "alice",
 //	      "savedAt": "2026-03-25T10:00:00Z"

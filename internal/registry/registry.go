@@ -14,7 +14,7 @@ import (
 )
 
 // Default registry base URL. Override with FGLPKG_REGISTRY env var.
-const defaultRegistry = "https://registry.fglpkg.dev"
+const defaultRegistry = "https://fglpkg-registry.fly.dev"
 
 // PackageInfo is the resolved metadata for a specific package version.
 type PackageInfo struct {

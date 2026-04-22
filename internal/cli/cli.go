@@ -1788,7 +1788,7 @@ func defaultRegistry() string {
 	if r := os.Getenv("FGLPKG_REGISTRY"); r != "" {
 		return strings.TrimRight(r, "/")
 	}
-	return "https://registry.fglpkg.dev"
+	return "https://fglpkg-registry.fly.dev"
 }
 
 func parsePackageArg(arg string) (name, version string, err error) {

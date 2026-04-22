@@ -397,7 +397,7 @@ When you run `fglpkg publish`, it automatically detects your local Genero versio
 
 ```
 $ fglpkg publish
-Publishing poiapi@1.0.0 (Genero 4 variant) to https://registry.fglpkg.dev...
+Publishing poiapi@1.0.0 (Genero 4 variant) to https://fglpkg-registry.fly.dev...
   Package zip: 4096 bytes (SHA256: abc123...)
   Uploading to GitHub (4js-mikefolcher/fglpkg-packages)...
   Uploaded: poiapi-1.0.0-genero4.zip
@@ -635,9 +635,9 @@ The `docs` field supports standard glob syntax with `**` for recursive matching:
 
 ```bash
 $ fglpkg login
-Registry URL (https://registry.fglpkg.dev):
+Registry URL (https://fglpkg-registry.fly.dev):
 Token: my-secret-token
-✓ Logged in to https://registry.fglpkg.dev as jdeveloper
+✓ Logged in to https://fglpkg-registry.fly.dev as jdeveloper
 GitHub token (optional, for package downloads): ghp_xxxxxxxxxxxx
 ✓ GitHub token saved for package downloads
 ```
@@ -648,7 +648,7 @@ Credentials (both registry and GitHub tokens) are stored in `~/.fglpkg/credentia
 
 ```bash
 $ fglpkg whoami
-Logged in to https://registry.fglpkg.dev as jdeveloper
+Logged in to https://fglpkg-registry.fly.dev as jdeveloper
 ```
 
 ### Logging Out

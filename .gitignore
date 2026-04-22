@@ -35,3 +35,6 @@ go.work.sum
 bin/
 .claude/
 .fglpkg/
+
+# Mac Files
+.DS_Store
