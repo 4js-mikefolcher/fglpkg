@@ -268,20 +268,12 @@ func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir
 		return result // nothing else makes sense to check
 	}
 
-	// Genero version check. A major version change requires re-resolution
-	// because different variants may be needed.
+	// Genero version check. Treated as a warning only — the user decides
+	// whether to run `fglpkg update` to re-resolve for a different runtime.
 	if currentGenero != "" && lf.GeneroVersion != currentGenero {
 		result.GeneroMismatch = &GeneroMismatchError{
 			Locked:  lf.GeneroVersion,
 			Current: currentGenero,
-		}
-		// If the major version changed, force re-resolution for correct variants.
-		if generoMajor(lf.GeneroVersion) != generoMajor(currentGenero) {
-			result.ManifestMismatch = &ManifestMismatchError{
-				Field:      "Genero major version",
-				InLock:     generoMajor(lf.GeneroVersion),
-				InManifest: generoMajor(currentGenero),
-			}
 		}
 	}
 

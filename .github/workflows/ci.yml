@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and cross-platform build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test (with race detector)
+        run: go test -race ./...
+
+      - name: Cross-platform build via cmd/build.sh
+        env:
+          FGLPKG_VERSION: ci-${{ github.ref_name }}
+          FGLPKG_BUILD: ${{ github.sha }}
+        run: ./cmd/build.sh
+
+      - name: Upload cross-platform binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: fglpkg-binaries-${{ github.sha }}
+          path: bin/
+          retention-days: 7

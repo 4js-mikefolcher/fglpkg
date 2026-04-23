@@ -312,16 +312,18 @@ func parseToken(tok string) ([]predicate, error) {
 	return []predicate{{op: "=", ver: v}}, nil
 }
 
-// parseTilde handles ~MAJOR.MINOR.PATCH, ~MAJOR.MINOR, ~MAJOR
+// parseTilde handles ~MAJOR.MINOR.PATCH, ~MAJOR.MINOR, ~MAJOR.
+// A pre-release suffix (e.g. ~1.2.3-beta) is attached to the lower bound.
 func parseTilde(s string) ([]predicate, error) {
-	parts := strings.Split(s, ".")
+	base, pre := splitPreRelease(s)
+	parts := strings.Split(base, ".")
 	switch len(parts) {
 	case 1: // ~1 → >=1.0.0 <2.0.0
 		maj, err := parseUint(parts[0])
 		if err != nil {
 			return nil, err
 		}
-		return rangePreds(maj, 0, 0, maj+1, 0, 0), nil
+		return rangePredsPre(maj, 0, 0, pre, maj+1, 0, 0), nil
 
 	case 2: // ~1.2 → >=1.2.0 <1.3.0
 		maj, err := parseUint(parts[0])
@@ -332,7 +334,7 @@ func parseTilde(s string) ([]predicate, error) {
 		if err != nil {
 			return nil, err
 		}
-		return rangePreds(maj, min, 0, maj, min+1, 0), nil
+		return rangePredsPre(maj, min, 0, pre, maj, min+1, 0), nil
 
 	case 3: // ~1.2.3 → >=1.2.3 <1.3.0
 		maj, err := parseUint(parts[0])
@@ -347,14 +349,16 @@ func parseTilde(s string) ([]predicate, error) {
 		if err != nil {
 			return nil, err
 		}
-		return rangePreds(maj, min, patch, maj, min+1, 0), nil
+		return rangePredsPre(maj, min, patch, pre, maj, min+1, 0), nil
 	}
 	return nil, fmt.Errorf("invalid tilde range: ~%s", s)
 }
 
 // parseCaret handles ^MAJOR.MINOR.PATCH with npm-compatible semantics.
+// A pre-release suffix (e.g. ^1.0.0-alpha) is attached to the lower bound.
 func parseCaret(s string) ([]predicate, error) {
-	parts := strings.Split(s, ".")
+	base, pre := splitPreRelease(s)
+	parts := strings.Split(base, ".")
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("invalid caret range: ^%s (expected MAJOR.MINOR.PATCH)", s)
 	}
@@ -374,12 +378,25 @@ func parseCaret(s string) ([]predicate, error) {
 
 	switch {
 	case maj > 0: // ^1.2.3 → >=1.2.3 <2.0.0
-		return rangePreds(maj, min, patch, maj+1, 0, 0), nil
+		return rangePredsPre(maj, min, patch, pre, maj+1, 0, 0), nil
 	case min > 0: // ^0.2.3 → >=0.2.3 <0.3.0
-		return rangePreds(0, min, patch, 0, min+1, 0), nil
+		return rangePredsPre(0, min, patch, pre, 0, min+1, 0), nil
 	default: // ^0.0.3 → >=0.0.3 <0.0.4
-		return rangePreds(0, 0, patch, 0, 0, patch+1), nil
+		return rangePredsPre(0, 0, patch, pre, 0, 0, patch+1), nil
 	}
+}
+
+// splitPreRelease peels off a -prerelease (and any +build) suffix, returning
+// the bare MAJOR.MINOR.PATCH base and the pre-release identifier (without
+// leading "-"). Build metadata is discarded since it does not affect ordering.
+func splitPreRelease(s string) (base, pre string) {
+	if idx := strings.IndexByte(s, '+'); idx >= 0 {
+		s = s[:idx]
+	}
+	if idx := strings.IndexByte(s, '-'); idx >= 0 {
+		return s[:idx], s[idx+1:]
+	}
+	return s, ""
 }
 
 // parseXRange handles 1.2.x, 1.x.x, 1.x, x
@@ -421,7 +438,13 @@ func parseXRange(s string) ([]predicate, error) {
 
 // rangePreds creates a [>=lo, <hi] predicate pair.
 func rangePreds(loMaj, loMin, loPatch, hiMaj, hiMin, hiPatch uint64) []predicate {
-	lo := Version{Major: loMaj, Minor: loMin, Patch: loPatch}
+	return rangePredsPre(loMaj, loMin, loPatch, "", hiMaj, hiMin, hiPatch)
+}
+
+// rangePredsPre is rangePreds with an optional pre-release identifier on the
+// lower bound, so e.g. ^1.0.0-alpha yields a lower bound of 1.0.0-alpha.
+func rangePredsPre(loMaj, loMin, loPatch uint64, loPre string, hiMaj, hiMin, hiPatch uint64) []predicate {
+	lo := Version{Major: loMaj, Minor: loMin, Patch: loPatch, PreRelease: loPre}
 	hi := Version{Major: hiMaj, Minor: hiMin, Patch: hiPatch}
 	return []predicate{
 		{op: ">=", ver: lo},

@@ -419,7 +419,7 @@ func TestReadAuthEnabledAllowsValidToken(t *testing.T) {
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
 // createUser calls POST /auth/token as admin and returns the new user's token.
-func createUser(t *testing.T, ts interface{ URL string }, username, adminToken string) string {
+func createUser(t *testing.T, ts *httptest.Server, username, adminToken string) string {
 	t.Helper()
 	body := fmt.Sprintf(`{"username":%q}`, username)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/auth/token",
@@ -441,7 +441,7 @@ func createUser(t *testing.T, ts interface{ URL string }, username, adminToken s
 }
 
 // listOwners calls GET /packages/:name/owners and returns the owner list.
-func listOwners(t *testing.T, ts interface{ URL string }, pkg, token string) []string {
+func listOwners(t *testing.T, ts *httptest.Server, pkg, token string) []string {
 	t.Helper()
 	resp := doRequest(t, http.MethodGet, ts.URL+"/packages/"+pkg+"/owners", token, "")
 	if resp.StatusCode != http.StatusOK {

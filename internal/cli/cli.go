@@ -22,6 +22,7 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	gh "github.com/4js-mikefolcher/fglpkg/internal/github"
 	"github.com/4js-mikefolcher/fglpkg/internal/installer"
+	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/workspace"
@@ -118,7 +119,7 @@ func cmdInit(_ []string) error {
 // ─── install ──────────────────────────────────────────────────────────────────
 
 func cmdInstall(args []string) error {
-	pkgArgs, forceLocal, forceGlobal := parseFlags(args)
+	pkgArgs, forceLocal, forceGlobal, forceReload := parseFlags(args)
 
 	home, isLocal, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
@@ -132,12 +133,24 @@ func cmdInstall(args []string) error {
 		fmt.Println("  Tip: add .fglpkg/ to your .gitignore file")
 	}
 
+	if forceReload {
+		if !isLocal {
+			return fmt.Errorf("--force is only supported for local installs; re-run inside a project directory or with --local")
+		}
+		if err := resetLocalInstall(projectDir, inst); err != nil {
+			return err
+		}
+	}
+
 	if len(pkgArgs) == 0 {
 		m, err := manifest.Load(".")
 		if err != nil {
-			return fmt.Errorf("failed to load %s: %w\nRun 'fglpkg init' first", manifest.Filename, err)
+			if os.IsNotExist(err) {
+				return fmt.Errorf("no %s in current directory — run 'fglpkg init' first", manifest.Filename)
+			}
+			return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
 		}
-		return inst.InstallAll(m, projectDir, false)
+		return inst.InstallAll(m, projectDir, forceReload)
 	}
 
 	m, err := manifest.LoadOrNew(".")
@@ -210,15 +223,36 @@ func isProjectDir() bool {
 	return false
 }
 
-// parseFlags extracts --local/-l and --global/-g flags from args,
-// returning the remaining args and the flag values.
-func parseFlags(args []string) (remaining []string, local, global bool) {
+// resetLocalInstall deletes fglpkg.lock and the local package and JAR
+// directories so the next install re-downloads everything from the
+// registry. Safe to call when nothing exists yet (missing files are
+// simply ignored).
+func resetLocalInstall(projectDir string, inst *installer.Installer) error {
+	lockPath := filepath.Join(projectDir, lockfile.Filename)
+	if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("cannot remove %s: %w", lockfile.Filename, err)
+	}
+	for _, dir := range []string{inst.PackagesDir(), inst.JarsDir()} {
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("cannot remove %s: %w", dir, err)
+		}
+	}
+	fmt.Println("Cleared fglpkg.lock and .fglpkg/ — reloading from registry...")
+	return nil
+}
+
+// parseFlags extracts --local/-l, --global/-g, and --force/-f flags from
+// args, returning the remaining args and the flag values. Commands that
+// do not use --force may simply ignore the returned value.
+func parseFlags(args []string) (remaining []string, local, global, force bool) {
 	for _, a := range args {
 		switch a {
 		case "--local", "-l":
 			local = true
 		case "--global", "-g":
 			global = true
+		case "--force", "-f":
+			force = true
 		default:
 			remaining = append(remaining, a)
 		}
@@ -229,7 +263,7 @@ func parseFlags(args []string) (remaining []string, local, global bool) {
 // ─── remove ───────────────────────────────────────────────────────────────────
 
 func cmdRemove(args []string) error {
-	pkgArgs, forceLocal, forceGlobal := parseFlags(args)
+	pkgArgs, forceLocal, forceGlobal, _ := parseFlags(args)
 	if len(pkgArgs) == 0 {
 		return fmt.Errorf("usage: fglpkg remove <package>")
 	}
@@ -255,7 +289,7 @@ func cmdRemove(args []string) error {
 // ─── update ───────────────────────────────────────────────────────────────────
 
 func cmdUpdate(args []string) error {
-	_, forceLocal, forceGlobal := parseFlags(args)
+	_, forceLocal, forceGlobal, _ := parseFlags(args)
 	home, _, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
 		return err
@@ -272,7 +306,7 @@ func cmdUpdate(args []string) error {
 // ─── list ─────────────────────────────────────────────────────────────────────
 
 func cmdList(args []string) error {
-	_, forceLocal, forceGlobal := parseFlags(args)
+	_, forceLocal, forceGlobal, _ := parseFlags(args)
 	home, _, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
 		return err
@@ -295,7 +329,7 @@ func cmdList(args []string) error {
 // ─── env ──────────────────────────────────────────────────────────────────────
 
 func cmdEnv(args []string) error {
-	_, forceLocal, forceGlobal := parseFlags(args)
+	_, forceLocal, forceGlobal, _ := parseFlags(args)
 	gst := false
 	for _, a := range args {
 		if a == "--gst" {
@@ -1709,6 +1743,10 @@ FLAGS (for install, remove, update, list, env):
   --local, -l       Force local project directory (.fglpkg/)
   --global, -g      Force global home directory (~/.fglpkg/)
   (default)         Auto-detect: local if .fglpkg/ or fglpkg.json exists
+
+FLAGS (for install only):
+  --force, -f       Delete fglpkg.lock and .fglpkg/ first, then re-download
+                    every package from the registry (local installs only)
 
 FLAGS (for env only):
   --gst             Output in Genero Studio format (implies --local)

@@ -236,6 +236,69 @@ func TestSaveLoadWithBinAndDocs(t *testing.T) {
 	}
 }
 
+// ─── Strict parsing ──────────────────────────────────────────────────────────
+
+func TestLoadRejectsUnknownTopLevelField(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"name":"x","version":"1.0.0","typoField":true}`
+	if err := os.WriteFile(filepath.Join(dir, "fglpkg.json"), []byte(raw), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := manifest.Load(dir)
+	if err == nil {
+		t.Fatal("expected error for unknown top-level field, got nil")
+	}
+	if !contains(err.Error(), "typoField") {
+		t.Errorf("error should mention the unknown field name, got: %v", err)
+	}
+}
+
+func TestLoadRejectsFlatDependencies(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{
+		"name": "x",
+		"version": "1.0.0",
+		"dependencies": {
+			"restdblib": ">=1.0.0"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "fglpkg.json"), []byte(raw), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := manifest.Load(dir)
+	if err == nil {
+		t.Fatal("expected error for flat dependencies, got nil")
+	}
+	msg := err.Error()
+	if !contains(msg, "restdblib") {
+		t.Errorf("error should name the offending key, got: %v", err)
+	}
+	if !contains(msg, "dependencies.fgl.restdblib") {
+		t.Errorf("error should suggest the correct nesting, got: %v", err)
+	}
+}
+
+func TestLoadAcceptsNestedFGLDependencies(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{
+		"name": "x",
+		"version": "1.0.0",
+		"dependencies": {
+			"fgl": { "restdblib": ">=1.0.0" }
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "fglpkg.json"), []byte(raw), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m, err := manifest.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if m.Dependencies.FGL["restdblib"] != ">=1.0.0" {
+		t.Errorf("expected restdblib >=1.0.0, got %v", m.Dependencies.FGL)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }

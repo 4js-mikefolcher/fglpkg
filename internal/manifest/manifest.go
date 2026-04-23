@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -40,6 +41,35 @@ type Manifest struct {
 type Dependencies struct {
 	FGL  map[string]string    `json:"fgl,omitempty"`  // name -> version constraint
 	Java []JavaDependency      `json:"java,omitempty"` // Maven coordinates
+}
+
+// UnmarshalJSON rejects unknown keys under `dependencies` with a hint,
+// since a common mistake is to put package names directly under
+// `dependencies` instead of nested under `dependencies.fgl`.
+func (d *Dependencies) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for k := range raw {
+		if k != "fgl" && k != "java" {
+			return fmt.Errorf(
+				`unknown key %q under "dependencies": expected "fgl" or "java". Did you mean "dependencies.fgl.%s"?`,
+				k, k,
+			)
+		}
+	}
+	if fglRaw, ok := raw["fgl"]; ok {
+		if err := json.Unmarshal(fglRaw, &d.FGL); err != nil {
+			return fmt.Errorf(`invalid "dependencies.fgl": %w`, err)
+		}
+	}
+	if javaRaw, ok := raw["java"]; ok {
+		if err := json.Unmarshal(javaRaw, &d.Java); err != nil {
+			return fmt.Errorf(`invalid "dependencies.java": %w`, err)
+		}
+	}
+	return nil
 }
 
 // JavaDependency describes a Java JAR dependency using Maven coordinates.
@@ -127,7 +157,10 @@ func New(name, version, description, author string) *Manifest {
 	}
 }
 
-// Load reads and parses fglpkg.json from dir.
+// Load reads and parses fglpkg.json from dir. Unknown fields at the top
+// level (or anywhere in the schema) produce an error rather than being
+// silently ignored, so typos like putting packages directly under
+// `dependencies` are caught early.
 func Load(dir string) (*Manifest, error) {
 	path := filepath.Join(dir, Filename)
 	data, err := os.ReadFile(path)
@@ -135,7 +168,9 @@ func Load(dir string) (*Manifest, error) {
 		return nil, err
 	}
 	var m Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("invalid %s: %w", Filename, err)
 	}
 	if m.Dependencies.FGL == nil {
