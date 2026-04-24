@@ -27,14 +27,24 @@ type Manifest struct {
 	// is compatible with, using standard semver constraint syntax.
 	// Examples: "^4.0.0", ">=3.20.0 <5.0.0", "^3.20.0 || ^4.0.0"
 	// Omit or set to "*" to indicate compatibility with any version.
-	GeneroConstraint string            `json:"genero,omitempty"`
-	Dependencies     Dependencies      `json:"dependencies"`
-	Root             string            `json:"root,omitempty"`  // base directory for package files (default ".")
-	Files            []string          `json:"files,omitempty"` // glob patterns for package zip
-	Bin              map[string]string `json:"bin,omitempty"`   // command name -> script path
-	Docs             []string          `json:"docs,omitempty"`     // glob patterns for doc files
-	Programs         []string          `json:"programs,omitempty"` // modules with MAIN blocks (e.g. "PoiConvert")
-	Scripts          map[string]string `json:"scripts,omitempty"`
+	GeneroConstraint string `json:"genero,omitempty"`
+	// Dependencies are production dependencies — required at runtime by
+	// anyone who installs this package.
+	Dependencies Dependencies `json:"dependencies"`
+	// DevDependencies are only installed for the root project (e.g. test
+	// harnesses, linters). A package's own dev dependencies are never
+	// pulled in transitively when another project depends on it.
+	DevDependencies Dependencies `json:"devDependencies,omitempty"`
+	// OptionalDependencies are installed like production deps but a failure
+	// to resolve or download one only emits a warning rather than aborting
+	// the install. Their transitive deps inherit the optional tolerance.
+	OptionalDependencies Dependencies      `json:"optionalDependencies,omitempty"`
+	Root                 string            `json:"root,omitempty"`     // base directory for package files (default ".")
+	Files                []string          `json:"files,omitempty"`    // glob patterns for package zip
+	Bin                  map[string]string `json:"bin,omitempty"`      // command name -> script path
+	Docs                 []string          `json:"docs,omitempty"`     // glob patterns for doc files
+	Programs             []string          `json:"programs,omitempty"` // modules with MAIN blocks (e.g. "PoiConvert")
+	Scripts              map[string]string `json:"scripts,omitempty"`
 }
 
 // Dependencies holds both FGL and Java dependency declarations.
@@ -157,6 +167,27 @@ func New(name, version, description, author string) *Manifest {
 	}
 }
 
+// Scope identifies which dependency bucket a declaration belongs to.
+type Scope string
+
+const (
+	ScopeProd     Scope = "prod"
+	ScopeDev      Scope = "dev"
+	ScopeOptional Scope = "optional"
+)
+
+// bucket returns a pointer to the Dependencies struct for the given scope.
+func (m *Manifest) bucket(scope Scope) *Dependencies {
+	switch scope {
+	case ScopeDev:
+		return &m.DevDependencies
+	case ScopeOptional:
+		return &m.OptionalDependencies
+	default:
+		return &m.Dependencies
+	}
+}
+
 // Load reads and parses fglpkg.json from dir. Unknown fields at the top
 // level (or anywhere in the schema) produce an error rather than being
 // silently ignored, so typos like putting packages directly under
@@ -175,6 +206,12 @@ func Load(dir string) (*Manifest, error) {
 	}
 	if m.Dependencies.FGL == nil {
 		m.Dependencies.FGL = map[string]string{}
+	}
+	if m.DevDependencies.FGL == nil {
+		m.DevDependencies.FGL = map[string]string{}
+	}
+	if m.OptionalDependencies.FGL == nil {
+		m.OptionalDependencies.FGL = map[string]string{}
 	}
 	return &m, nil
 }
@@ -198,39 +235,165 @@ func (m *Manifest) Save(dir string) error {
 	return os.WriteFile(path, append(data, '\n'), 0644)
 }
 
-// AddFGLDependency adds or updates a BDL package dependency.
-func (m *Manifest) AddFGLDependency(name, version string) {
-	if m.Dependencies.FGL == nil {
-		m.Dependencies.FGL = map[string]string{}
+// MarshalJSON is a thin wrapper around the default encoder that drops the
+// devDependencies and optionalDependencies keys when their bucket is empty.
+// The standard json package's `omitempty` tag only recognises nil pointers,
+// empty maps/slices, and zero primitives — it does not skip zero-value struct
+// fields, so we strip them with a token-stream rewrite that preserves the
+// original (struct-defined) key order.
+func (m *Manifest) MarshalJSON() ([]byte, error) {
+	type alias Manifest
+	buf, err := json.Marshal((*alias)(m))
+	if err != nil {
+		return nil, err
 	}
-	m.Dependencies.FGL[name] = version
+	dec := json.NewDecoder(bytes.NewReader(buf))
+	if _, err := dec.Token(); err != nil { // read opening '{'
+		return nil, err
+	}
+	var out bytes.Buffer
+	out.WriteByte('{')
+	first := true
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return nil, fmt.Errorf("manifest marshal: expected string key, got %T", tok)
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, err
+		}
+		if (key == "devDependencies" || key == "optionalDependencies") && isEmptyDependenciesJSON(raw) {
+			continue
+		}
+		if !first {
+			out.WriteByte(',')
+		}
+		first = false
+		keyJSON, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		out.Write(keyJSON)
+		out.WriteByte(':')
+		out.Write(raw)
+	}
+	out.WriteByte('}')
+	return out.Bytes(), nil
 }
 
-// RemoveFGLDependency removes a BDL package dependency.
-func (m *Manifest) RemoveFGLDependency(name string) {
-	delete(m.Dependencies.FGL, name)
+// isEmptyDependenciesJSON returns true when the JSON-encoded Dependencies
+// struct has no fgl entries and no java entries.
+func isEmptyDependenciesJSON(raw json.RawMessage) bool {
+	var d Dependencies
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return false
+	}
+	return len(d.FGL) == 0 && len(d.Java) == 0
 }
 
-// AddJavaDependency adds or replaces a Java dependency by groupId:artifactId key.
+// AddFGLDependency adds or updates a BDL package dependency in the production
+// scope. It also removes the name from dev and optional scopes so a package
+// lives in exactly one bucket.
+func (m *Manifest) AddFGLDependency(name, version string) {
+	m.AddFGLDependencyScoped(name, version, ScopeProd)
+}
+
+// AddFGLDependencyScoped adds or updates a BDL package dependency in the
+// given scope. Any existing declaration in a different scope is removed, so
+// a given name appears in exactly one bucket.
+func (m *Manifest) AddFGLDependencyScoped(name, version string, scope Scope) {
+	for _, s := range []Scope{ScopeProd, ScopeDev, ScopeOptional} {
+		if s == scope {
+			continue
+		}
+		delete(m.bucket(s).FGL, name)
+	}
+	b := m.bucket(scope)
+	if b.FGL == nil {
+		b.FGL = map[string]string{}
+	}
+	b.FGL[name] = version
+}
+
+// RemoveFGLDependency removes a BDL package dependency from whichever scope
+// it lives in. Returns the scope it was removed from, or "" if not present.
+func (m *Manifest) RemoveFGLDependency(name string) Scope {
+	for _, s := range []Scope{ScopeProd, ScopeDev, ScopeOptional} {
+		if _, ok := m.bucket(s).FGL[name]; ok {
+			delete(m.bucket(s).FGL, name)
+			return s
+		}
+	}
+	return ""
+}
+
+// FindFGLDependency returns the version constraint and scope for the named
+// package, or "", "" if it is not declared in any scope.
+func (m *Manifest) FindFGLDependency(name string) (constraint string, scope Scope) {
+	for _, s := range []Scope{ScopeProd, ScopeDev, ScopeOptional} {
+		if v, ok := m.bucket(s).FGL[name]; ok {
+			return v, s
+		}
+	}
+	return "", ""
+}
+
+// AddJavaDependency adds or replaces a Java dependency by groupId:artifactId
+// key in the production scope.
 func (m *Manifest) AddJavaDependency(dep JavaDependency) {
-	for i, existing := range m.Dependencies.Java {
+	m.AddJavaDependencyScoped(dep, ScopeProd)
+}
+
+// AddJavaDependencyScoped adds or replaces a Java dependency by
+// groupId:artifactId key in the given scope. Removes the dep from other
+// scopes so it appears in exactly one bucket.
+func (m *Manifest) AddJavaDependencyScoped(dep JavaDependency, scope Scope) {
+	for _, s := range []Scope{ScopeProd, ScopeDev, ScopeOptional} {
+		if s == scope {
+			continue
+		}
+		m.removeJavaKeyFrom(s, dep.Key())
+	}
+	b := m.bucket(scope)
+	for i, existing := range b.Java {
 		if existing.Key() == dep.Key() {
-			m.Dependencies.Java[i] = dep
+			b.Java[i] = dep
 			return
 		}
 	}
-	m.Dependencies.Java = append(m.Dependencies.Java, dep)
+	b.Java = append(b.Java, dep)
 }
 
-// RemoveJavaDependency removes a Java dependency by groupId:artifactId key.
-func (m *Manifest) RemoveJavaDependency(key string) {
-	filtered := m.Dependencies.Java[:0]
-	for _, dep := range m.Dependencies.Java {
-		if dep.Key() != key {
-			filtered = append(filtered, dep)
+// RemoveJavaDependency removes a Java dependency by groupId:artifactId key
+// from whichever scope it lives in. Returns the scope it was removed from,
+// or "" if not present.
+func (m *Manifest) RemoveJavaDependency(key string) Scope {
+	for _, s := range []Scope{ScopeProd, ScopeDev, ScopeOptional} {
+		if m.removeJavaKeyFrom(s, key) {
+			return s
 		}
 	}
-	m.Dependencies.Java = filtered
+	return ""
+}
+
+func (m *Manifest) removeJavaKeyFrom(scope Scope, key string) bool {
+	b := m.bucket(scope)
+	removed := false
+	filtered := b.Java[:0]
+	for _, dep := range b.Java {
+		if dep.Key() == key {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, dep)
+	}
+	b.Java = filtered
+	return removed
 }
 
 // Validate performs basic sanity checks on the manifest.
@@ -246,11 +409,13 @@ func (m *Manifest) Validate() error {
 			return fmt.Errorf("invalid genero constraint %q: %w", m.GeneroConstraint, err)
 		}
 	}
-	for _, dep := range m.Dependencies.Java {
-		if dep.GroupID == "" || dep.ArtifactID == "" || dep.Version == "" {
-			return fmt.Errorf(
-				"java dependency missing required fields (groupId, artifactId, version): %+v", dep,
-			)
+	for _, scope := range []Scope{ScopeProd, ScopeDev, ScopeOptional} {
+		for _, dep := range m.bucket(scope).Java {
+			if dep.GroupID == "" || dep.ArtifactID == "" || dep.Version == "" {
+				return fmt.Errorf(
+					"java dependency missing required fields (groupId, artifactId, version): %+v", dep,
+				)
+			}
 		}
 	}
 	for cmd, scriptPath := range m.Bin {

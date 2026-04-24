@@ -202,8 +202,10 @@ eval "$(fglpkg env --global)"
 | `files` | No | Glob patterns for files to include in the zip (default `["*.42m", "*.42f", "*.sch"]`) |
 | `bin` | No | Command name to script path mappings (e.g., `{"migrate": "scripts/migrate.sh"}`) |
 | `docs` | No | Glob patterns for documentation files to include (e.g., `["README.md", "docs/**/*.md"]`) |
-| `dependencies.fgl` | No | BDL package dependencies (`name` -> `version constraint`) |
-| `dependencies.java` | No | Java JAR dependencies (Maven coordinates) |
+| `dependencies.fgl` | No | BDL production package dependencies (`name` -> `version constraint`) |
+| `dependencies.java` | No | Java JAR production dependencies (Maven coordinates) |
+| `devDependencies` | No | Test / tooling deps (fgl + java), skipped with `--production` |
+| `optionalDependencies` | No | Attempted like prod, failures emit a warning instead of aborting |
 | `programs` | No | List of module names with MAIN blocks (e.g., `["PoiConvert"]`) |
 | `scripts` | No | Custom script definitions |
 
@@ -228,9 +230,12 @@ fglpkg init                              # Initialise fglpkg.json interactively
 fglpkg install                           # Install deps (auto-detects local vs global)
 fglpkg install myutils                   # Add + install latest version
 fglpkg install myutils@1.2.0             # Add + install specific version
+fglpkg install tester -D                 # Add under devDependencies
+fglpkg install telemetry -O              # Add under optionalDependencies
+fglpkg install --production              # Skip devDependencies (CI / deploy)
 fglpkg install --global                  # Force install to ~/.fglpkg/
 fglpkg install --local                   # Force install to .fglpkg/
-fglpkg remove myutils                    # Remove a package
+fglpkg remove myutils                    # Remove a package (any scope)
 fglpkg update                            # Re-resolve and update all dependencies
 fglpkg list                              # List installed packages
 fglpkg env                               # Print export statements (auto-detects scope)

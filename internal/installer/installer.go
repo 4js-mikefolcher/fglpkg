@@ -44,12 +44,24 @@ func New(home, githubToken string) *Installer {
 	}
 }
 
+// Options controls optional install behaviour.
+type Options struct {
+	// Production skips dev-scoped packages and JARs. Optional entries are
+	// still attempted.
+	Production bool
+}
+
 // InstallAll resolves or reads from the lock file, then installs every
 // BDL package and Java JAR. If a valid lock file exists and matches the
 // current environment, it is used directly (no network resolution needed).
 // Pass forceResolve=true to bypass the lock and re-resolve from scratch
 // (used by `fglpkg update`).
 func (i *Installer) InstallAll(m *manifest.Manifest, projectDir string, forceResolve bool) error {
+	return i.InstallAllWithOptions(m, projectDir, forceResolve, Options{})
+}
+
+// InstallAllWithOptions is InstallAll with caller-controlled options.
+func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir string, forceResolve bool, opts Options) error {
 	if err := i.ensureDirs(); err != nil {
 		return err
 	}
@@ -79,7 +91,7 @@ func (i *Installer) InstallAll(m *manifest.Manifest, projectDir string, forceRes
 				}
 				// Lock is valid but some packages are missing on disk — install them.
 				fmt.Printf("Installing from lock file (Genero %s)...\n", gv)
-				return i.installFromLock(lf)
+				return i.installFromLock(lf, opts)
 			}
 		}
 	}
@@ -90,7 +102,11 @@ func (i *Installer) InstallAll(m *manifest.Manifest, projectDir string, forceRes
 	if err != nil {
 		return fmt.Errorf("cannot initialise resolver: %w", err)
 	}
-	plan, err := r.Resolve(m)
+	resolveOpts := resolver.DefaultResolveOptions()
+	if opts.Production {
+		resolveOpts.IncludeDev = false
+	}
+	plan, err := r.ResolveWithOptions(m, resolveOpts)
 	if err != nil {
 		return fmt.Errorf("dependency resolution failed:\n%w", err)
 	}
@@ -98,21 +114,32 @@ func (i *Installer) InstallAll(m *manifest.Manifest, projectDir string, forceRes
 
 	// Write the lock file before installing so it's always present even if
 	// installation is interrupted partway through.
-	lf := lockfile.FromPlan(plan, m)
-	if err := lf.Save(projectDir); err != nil {
-		// Non-fatal: warn but continue with the install.
-		fmt.Printf("warning: could not write lock file: %v\n", err)
-	} else {
-		fmt.Printf("Wrote %s\n\n", lockfile.Filename)
+	// When --production is in effect we do NOT overwrite the lock file,
+	// because it would drop dev entries that should remain recorded.
+	if !opts.Production {
+		lf := lockfile.FromPlan(plan, m)
+		if err := lf.Save(projectDir); err != nil {
+			// Non-fatal: warn but continue with the install.
+			fmt.Printf("warning: could not write lock file: %v\n", err)
+		} else {
+			fmt.Printf("Wrote %s\n\n", lockfile.Filename)
+		}
 	}
 
 	return i.installFromPlan(plan)
 }
 
 // installFromLock installs every entry in the lock file using its pinned
-// URLs and checksums, bypassing the resolver entirely.
-func (i *Installer) installFromLock(lf *lockfile.LockFile) error {
-	pkgs, jars := lf.ToInstallList()
+// URLs and checksums, bypassing the resolver entirely. When opts.Production
+// is true, dev-scoped entries are skipped.
+func (i *Installer) installFromLock(lf *lockfile.LockFile, opts Options) error {
+	var pkgs []lockfile.LockedPackage
+	var jars []lockfile.LockedJAR
+	if opts.Production {
+		pkgs, jars = lf.FilterForProduction()
+	} else {
+		pkgs, jars = lf.ToInstallList()
+	}
 
 	for _, pkg := range pkgs {
 		if _, err := os.Stat(filepath.Join(i.packagesDir, pkg.Name)); err == nil {
@@ -154,6 +181,8 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile) error {
 }
 
 // installFromPlan installs every entry in a freshly resolved Plan.
+// Optional-scoped items whose download or extraction fails emit a warning
+// and are skipped; hard-scope failures abort the install.
 func (i *Installer) installFromPlan(plan *resolver.Plan) error {
 	for _, pkg := range plan.Packages {
 		fmt.Printf("  → %s@%s", pkg.Name, pkg.Version.String())
@@ -168,6 +197,10 @@ func (i *Installer) installFromPlan(plan *resolver.Plan) error {
 			Checksum:    pkg.Checksum,
 		}
 		if err := i.Install(info); err != nil {
+			if pkg.Scope == manifest.ScopeOptional {
+				fmt.Printf("  warning: skipping optional package %s: %v\n", pkg.Name, err)
+				continue
+			}
 			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
 		}
 		fmt.Printf("  ✓ %s@%s\n", pkg.Name, pkg.Version.String())
@@ -175,6 +208,10 @@ func (i *Installer) installFromPlan(plan *resolver.Plan) error {
 	for _, dep := range plan.JARs {
 		fmt.Printf("  → JAR %s\n", dep.Key())
 		if err := i.InstallJar(dep); err != nil {
+			if plan.JARScopes[dep.Key()] == manifest.ScopeOptional {
+				fmt.Printf("  warning: skipping optional JAR %s: %v\n", dep.Key(), err)
+				continue
+			}
 			return fmt.Errorf("failed to install JAR %s: %w", dep.Key(), err)
 		}
 		fmt.Printf("  ✓ %s\n", dep.JarFileName())

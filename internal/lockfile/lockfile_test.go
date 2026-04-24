@@ -319,3 +319,79 @@ func TestToInstallList(t *testing.T) {
 		t.Errorf("expected 2 JARs, got %d", len(jars))
 	}
 }
+
+// ─── Scopes ──────────────────────────────────────────────────────────────────
+
+// Scope is written through from Plan to LockedPackage/LockedJAR, and prod
+// entries omit the field so existing lock files remain backwards-compatible.
+func TestFromPlanCarriesScope(t *testing.T) {
+	plan := &resolver.Plan{
+		GeneroVersion: genero.MustParse("4.01.12"),
+		Packages: []resolver.ResolvedPackage{
+			{Name: "a", Version: semver.MustParse("1.0.0"), Scope: manifest.ScopeProd},
+			{Name: "b", Version: semver.MustParse("1.0.0"), Scope: manifest.ScopeDev},
+			{Name: "c", Version: semver.MustParse("1.0.0"), Scope: manifest.ScopeOptional},
+		},
+		JARs: []manifest.JavaDependency{
+			{GroupID: "g", ArtifactID: "prod-jar", Version: "1"},
+			{GroupID: "g", ArtifactID: "dev-jar", Version: "1"},
+		},
+		JARScopes: map[string]manifest.Scope{
+			"g:prod-jar": manifest.ScopeProd,
+			"g:dev-jar":  manifest.ScopeDev,
+		},
+	}
+	lf := lockfile.FromPlan(plan, makeRoot())
+	want := map[string]string{"a": "", "b": "dev", "c": "optional"}
+	for _, p := range lf.Packages {
+		if got := want[p.Name]; p.Scope != got {
+			t.Errorf("package %s scope: got %q want %q", p.Name, p.Scope, got)
+		}
+	}
+	for _, j := range lf.JARs {
+		switch j.ArtifactID {
+		case "prod-jar":
+			if j.Scope != "" {
+				t.Errorf("prod-jar: expected empty scope, got %q", j.Scope)
+			}
+		case "dev-jar":
+			if j.Scope != "dev" {
+				t.Errorf("dev-jar: expected dev, got %q", j.Scope)
+			}
+		}
+	}
+}
+
+// FilterForProduction drops dev-scoped entries and keeps prod + optional.
+func TestFilterForProduction(t *testing.T) {
+	plan := &resolver.Plan{
+		GeneroVersion: genero.MustParse("4.01.12"),
+		Packages: []resolver.ResolvedPackage{
+			{Name: "a", Version: semver.MustParse("1.0.0"), Scope: manifest.ScopeProd},
+			{Name: "b", Version: semver.MustParse("1.0.0"), Scope: manifest.ScopeDev},
+			{Name: "c", Version: semver.MustParse("1.0.0"), Scope: manifest.ScopeOptional},
+		},
+		JARs: []manifest.JavaDependency{
+			{GroupID: "g", ArtifactID: "j1", Version: "1"},
+			{GroupID: "g", ArtifactID: "j2", Version: "1"},
+		},
+		JARScopes: map[string]manifest.Scope{
+			"g:j1": manifest.ScopeProd,
+			"g:j2": manifest.ScopeDev,
+		},
+	}
+	lf := lockfile.FromPlan(plan, makeRoot())
+	pkgs, jars := lf.FilterForProduction()
+
+	if len(pkgs) != 2 {
+		t.Errorf("expected 2 packages (prod+optional), got %d", len(pkgs))
+	}
+	for _, p := range pkgs {
+		if p.Scope == "dev" {
+			t.Errorf("dev package %q leaked into production filter", p.Name)
+		}
+	}
+	if len(jars) != 1 {
+		t.Errorf("expected 1 JAR (prod only), got %d", len(jars))
+	}
+}

@@ -347,6 +347,132 @@ func TestCycleSafety(t *testing.T) {
 	}
 }
 
+// ─── Scopes: dev + optional ──────────────────────────────────────────────────
+
+// ResolveWithOptions(IncludeDev=false) must skip dev-only root deps and any
+// transitive deps reached only through them.
+func TestResolveProductionExcludesDevSubtree(t *testing.T) {
+	db := packageDB{
+		"prodlib":   {"1.0.0": entry("", pkg("prodlib", "1.0.0", map[string]string{"common": "^1.0.0"}))},
+		"devhelper": {"1.0.0": entry("", pkg("devhelper", "1.0.0", map[string]string{"devonly": "^1.0.0"}))},
+		"common":    {"1.0.0": entry("", pkg("common", "1.0.0", nil))},
+		"devonly":   {"1.0.0": entry("", pkg("devonly", "1.0.0", nil))},
+	}
+
+	root := manifest.New("app", "1.0.0", "", "")
+	root.AddFGLDependencyScoped("prodlib", "^1.0.0", manifest.ScopeProd)
+	root.AddFGLDependencyScoped("devhelper", "^1.0.0", manifest.ScopeDev)
+
+	plan, err := db.newResolver(genero401).ResolveWithOptions(root, resolver.ResolveOptions{IncludeDev: false, IncludeOptional: false})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	names := planByName(plan)
+	if _, ok := names["prodlib"]; !ok {
+		t.Error("prodlib should be installed in production mode")
+	}
+	if _, ok := names["common"]; !ok {
+		t.Error("common (transitive of prodlib) should be installed")
+	}
+	if _, ok := names["devhelper"]; ok {
+		t.Error("devhelper should be skipped in production mode")
+	}
+	if _, ok := names["devonly"]; ok {
+		t.Error("devonly (transitive of devhelper) should be skipped in production mode")
+	}
+}
+
+// The default Resolve path MUST include dev + optional at the root.
+func TestResolveDefaultIncludesDevAndOptional(t *testing.T) {
+	db := packageDB{
+		"prodlib": {"1.0.0": entry("", pkg("prodlib", "1.0.0", nil))},
+		"devlib":  {"1.0.0": entry("", pkg("devlib", "1.0.0", nil))},
+		"opt":     {"1.0.0": entry("", pkg("opt", "1.0.0", nil))},
+	}
+
+	root := manifest.New("app", "1.0.0", "", "")
+	root.AddFGLDependencyScoped("prodlib", "^1.0.0", manifest.ScopeProd)
+	root.AddFGLDependencyScoped("devlib", "^1.0.0", manifest.ScopeDev)
+	root.AddFGLDependencyScoped("opt", "^1.0.0", manifest.ScopeOptional)
+
+	plan, err := db.newResolver(genero401).Resolve(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	names := planByName(plan)
+	if names["prodlib"].Scope != manifest.ScopeProd {
+		t.Errorf("prodlib scope: got %q", names["prodlib"].Scope)
+	}
+	if names["devlib"].Scope != manifest.ScopeDev {
+		t.Errorf("devlib scope: got %q", names["devlib"].Scope)
+	}
+	if names["opt"].Scope != manifest.ScopeOptional {
+		t.Errorf("opt scope: got %q", names["opt"].Scope)
+	}
+}
+
+// When a package is reachable via both a prod and a dev path, scope must
+// promote to prod so `--production` still installs it.
+func TestResolveScopePromotionProdBeatsDev(t *testing.T) {
+	db := packageDB{
+		"prodroot": {"1.0.0": entry("", pkg("prodroot", "1.0.0", map[string]string{"shared": "^1.0.0"}))},
+		"devroot":  {"1.0.0": entry("", pkg("devroot", "1.0.0", map[string]string{"shared": "^1.0.0"}))},
+		"shared":   {"1.0.0": entry("", pkg("shared", "1.0.0", nil))},
+	}
+	root := manifest.New("app", "1.0.0", "", "")
+	root.AddFGLDependencyScoped("prodroot", "^1.0.0", manifest.ScopeProd)
+	root.AddFGLDependencyScoped("devroot", "^1.0.0", manifest.ScopeDev)
+
+	plan, err := db.newResolver(genero401).Resolve(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	shared := planByName(plan)["shared"]
+	if shared.Scope != manifest.ScopeProd {
+		t.Errorf("expected shared to promote to prod, got %q", shared.Scope)
+	}
+}
+
+// An optional root dep that cannot be resolved is skipped with a warning,
+// not treated as a hard failure.
+func TestResolveOptionalMissingPackageSkipped(t *testing.T) {
+	db := packageDB{
+		"prodlib": {"1.0.0": entry("", pkg("prodlib", "1.0.0", nil))},
+		// "opt" is not in the registry
+	}
+	root := manifest.New("app", "1.0.0", "", "")
+	root.AddFGLDependencyScoped("prodlib", "^1.0.0", manifest.ScopeProd)
+	root.AddFGLDependencyScoped("opt", "^1.0.0", manifest.ScopeOptional)
+
+	plan, err := db.newResolver(genero401).Resolve(root)
+	if err != nil {
+		t.Fatalf("optional failure should not error, got: %v", err)
+	}
+	if _, ok := planByName(plan)["opt"]; ok {
+		t.Error("opt should have been dropped")
+	}
+	if len(plan.OptionalSkipped) == 0 {
+		t.Error("expected OptionalSkipped to record the skip")
+	}
+}
+
+// An optional dep with no Genero-compatible version is skipped, not errored.
+func TestResolveOptionalGeneroIncompatibleSkipped(t *testing.T) {
+	db := packageDB{
+		"legacy": {"1.0.0": entry("^3.0.0", pkg("legacy", "1.0.0", nil))},
+	}
+	root := manifest.New("app", "1.0.0", "", "")
+	root.AddFGLDependencyScoped("legacy", "^1.0.0", manifest.ScopeOptional)
+
+	plan, err := db.newResolver(genero401).Resolve(root)
+	if err != nil {
+		t.Fatalf("optional incompat should not error, got: %v", err)
+	}
+	if _, ok := planByName(plan)["legacy"]; ok {
+		t.Error("legacy should have been dropped")
+	}
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func planByName(plan *resolver.Plan) map[string]resolver.ResolvedPackage {

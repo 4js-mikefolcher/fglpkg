@@ -299,6 +299,108 @@ func TestLoadAcceptsNestedFGLDependencies(t *testing.T) {
 	}
 }
 
+// ─── Scopes: dev + optional ──────────────────────────────────────────────────
+
+func TestScopedDependenciesRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{
+		"name": "x",
+		"version": "1.0.0",
+		"dependencies": { "fgl": { "core": "^1.0.0" } },
+		"devDependencies": { "fgl": { "tester": "^0.1.0" } },
+		"optionalDependencies": { "fgl": { "telemetry": "^2.0.0" } }
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "fglpkg.json"), []byte(raw), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m, err := manifest.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if m.Dependencies.FGL["core"] != "^1.0.0" {
+		t.Errorf("prod dep missing: %v", m.Dependencies.FGL)
+	}
+	if m.DevDependencies.FGL["tester"] != "^0.1.0" {
+		t.Errorf("dev dep missing: %v", m.DevDependencies.FGL)
+	}
+	if m.OptionalDependencies.FGL["telemetry"] != "^2.0.0" {
+		t.Errorf("optional dep missing: %v", m.OptionalDependencies.FGL)
+	}
+}
+
+// Adding a dep under one scope must remove it from any other scope it used to
+// live in, so the same name never appears in two buckets.
+func TestAddFGLDependencyScopedMovesBetweenScopes(t *testing.T) {
+	m := manifest.New("x", "1.0.0", "", "")
+	m.AddFGLDependencyScoped("foo", "^1.0.0", manifest.ScopeDev)
+	if _, ok := m.DevDependencies.FGL["foo"]; !ok {
+		t.Fatal("expected foo in dev")
+	}
+	m.AddFGLDependencyScoped("foo", "^1.0.0", manifest.ScopeProd)
+	if _, ok := m.DevDependencies.FGL["foo"]; ok {
+		t.Error("expected foo removed from dev after moving to prod")
+	}
+	if _, ok := m.Dependencies.FGL["foo"]; !ok {
+		t.Error("expected foo in prod")
+	}
+	m.AddFGLDependencyScoped("foo", "^1.0.0", manifest.ScopeOptional)
+	if _, ok := m.Dependencies.FGL["foo"]; ok {
+		t.Error("expected foo removed from prod after moving to optional")
+	}
+	if _, ok := m.OptionalDependencies.FGL["foo"]; !ok {
+		t.Error("expected foo in optional")
+	}
+}
+
+func TestRemoveFGLDependencyFindsAnyScope(t *testing.T) {
+	m := manifest.New("x", "1.0.0", "", "")
+	m.AddFGLDependencyScoped("foo", "^1.0.0", manifest.ScopeDev)
+	scope := m.RemoveFGLDependency("foo")
+	if scope != manifest.ScopeDev {
+		t.Errorf("expected ScopeDev, got %q", scope)
+	}
+	if _, ok := m.DevDependencies.FGL["foo"]; ok {
+		t.Error("foo should be gone from dev")
+	}
+	// removing a non-existent name returns empty scope, no panic
+	if got := m.RemoveFGLDependency("bar"); got != "" {
+		t.Errorf("expected empty scope for absent name, got %q", got)
+	}
+}
+
+func TestFindFGLDependencyReportsScope(t *testing.T) {
+	m := manifest.New("x", "1.0.0", "", "")
+	m.AddFGLDependencyScoped("a", "^1.0.0", manifest.ScopeProd)
+	m.AddFGLDependencyScoped("b", "^1.0.0", manifest.ScopeOptional)
+	if v, s := m.FindFGLDependency("a"); v != "^1.0.0" || s != manifest.ScopeProd {
+		t.Errorf("a: got (%q,%q)", v, s)
+	}
+	if v, s := m.FindFGLDependency("b"); v != "^1.0.0" || s != manifest.ScopeOptional {
+		t.Errorf("b: got (%q,%q)", v, s)
+	}
+	if v, s := m.FindFGLDependency("missing"); v != "" || s != "" {
+		t.Errorf("missing: got (%q,%q)", v, s)
+	}
+}
+
+// Omitempty on DevDependencies/OptionalDependencies keeps existing manifests
+// free of cruft when those scopes are unused.
+func TestOmitEmptyScopedDependencies(t *testing.T) {
+	m := manifest.New("x", "1.0.0", "", "")
+	m.AddFGLDependency("only-prod", "^1.0.0")
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out := string(data)
+	if containsHelper(out, "devDependencies") {
+		t.Errorf("expected devDependencies omitted, got: %s", out)
+	}
+	if containsHelper(out, "optionalDependencies") {
+		t.Errorf("expected optionalDependencies omitted, got: %s", out)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }

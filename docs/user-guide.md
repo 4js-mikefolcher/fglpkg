@@ -226,13 +226,34 @@ fglpkg install myutils@1.2.0
 
 This resolves the version, adds it to your `fglpkg.json`, and installs it.
 
+### Dependency Scopes (prod / dev / optional)
+
+Packages can be recorded under three scopes depending on when they should be installed:
+
+| Scope | When installed | Added to | Transitively pulled? |
+|---|---|---|---|
+| `dependencies` (prod) | Always | default, or `-P` / `--save-prod` | Yes — consumers get these too |
+| `devDependencies` | Developer workflows only, skipped with `--production` | `-D` / `--save-dev` | No — a library's dev deps are private to it |
+| `optionalDependencies` | Attempted like prod, but failures warn and continue | `-O` / `--save-optional` | Yes — and the optional tolerance inherits to transitive deps |
+
+```bash
+fglpkg install mytester -D         # add to devDependencies
+fglpkg install telemetry -O        # add to optionalDependencies
+fglpkg install core-lib -P         # explicit prod (same as no flag)
+fglpkg install --production        # install everything EXCEPT devDependencies
+```
+
+`--production` is intended for CI / deployment builds: it skips the dev scope entirely and still attempts optional packages, warning on failure. It does NOT overwrite `fglpkg.lock`, so a production install cannot accidentally strip dev entries from the lock recorded by the developer.
+
+Peer dependencies are intentionally not supported — they solve a JS/TS singleton problem (React, TypeScript) that has no clean analog in BDL's module layout. Use a version constraint on a prod dep if you need callers to align on a version.
+
 ### Removing a Package
 
 ```bash
 fglpkg remove myutils
 ```
 
-This deletes the package from `~/.fglpkg/packages/` and removes it from `fglpkg.json`.
+This deletes the package from `~/.fglpkg/packages/` and removes it from whichever scope (`dependencies`, `devDependencies`, or `optionalDependencies`) it lives in. The command tells you which scope was touched.
 
 ### Updating Dependencies
 

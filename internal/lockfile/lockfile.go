@@ -92,6 +92,11 @@ type LockedPackage struct {
 	// RequiredBy lists every package (or "<root>") that declared a dependency
 	// on this package, enabling humans to trace why it was included.
 	RequiredBy []string `json:"requiredBy"`
+
+	// Scope is the dependency scope this package was installed under: "dev"
+	// or "optional". Empty means production. Used by `fglpkg install
+	// --production` to skip dev-scoped entries.
+	Scope string `json:"scope,omitempty"`
 }
 
 // LockedJAR is the fully-pinned record of one Java JAR.
@@ -108,6 +113,10 @@ type LockedJAR struct {
 
 	// Checksum is the SHA256 hex digest of the JAR file.
 	Checksum string `json:"checksum,omitempty"`
+
+	// Scope is the dependency scope this JAR was installed under: "dev"
+	// or "optional". Empty means production.
+	Scope string `json:"scope,omitempty"`
 }
 
 // ─── Construction ─────────────────────────────────────────────────────────────
@@ -127,6 +136,7 @@ func FromPlan(plan *resolver.Plan, root *manifest.Manifest) *LockFile {
 			Checksum:    p.Checksum,
 			GeneroMajor: plan.GeneroVersion.MajorString(),
 			RequiredBy:  requiredBy,
+			Scope:       scopeLockString(p.Scope),
 		})
 	}
 	// Sort by name for stable, reviewable diffs.
@@ -141,6 +151,7 @@ func FromPlan(plan *resolver.Plan, root *manifest.Manifest) *LockFile {
 			Version:     dep.Version,
 			DownloadURL: dep.MavenURL(),
 			Checksum:    dep.Checksum,
+			Scope:       scopeLockString(plan.JARScopes[dep.Key()]),
 		})
 	}
 	sort.Slice(jars, func(i, j int) bool { return jars[i].Key < jars[j].Key })
@@ -313,9 +324,44 @@ func generoMajor(v string) string {
 	return v
 }
 
+// scopeLockString converts a manifest.Scope into the string value stored in
+// the lock file. Production is stored as "" (omitempty) so the lock file
+// stays compact and backwards-compatible.
+func scopeLockString(s manifest.Scope) string {
+	if s == manifest.ScopeDev {
+		return "dev"
+	}
+	if s == manifest.ScopeOptional {
+		return "optional"
+	}
+	return ""
+}
+
 // ToInstallList converts the lock file back into the flat lists needed by
 // the installer, so a locked install never touches the resolver or registry
 // for version negotiation — it uses exact URLs and checksums directly.
 func (lf *LockFile) ToInstallList() ([]LockedPackage, []LockedJAR) {
 	return lf.Packages, lf.JARs
+}
+
+// FilterForProduction returns the subset of packages and JARs that should be
+// installed when `fglpkg install --production` is used: everything except
+// dev-scoped entries. Optional entries are retained — they are still
+// attempted (a bad optional dep was already dropped at resolve time).
+func (lf *LockFile) FilterForProduction() ([]LockedPackage, []LockedJAR) {
+	pkgs := make([]LockedPackage, 0, len(lf.Packages))
+	for _, p := range lf.Packages {
+		if p.Scope == "dev" {
+			continue
+		}
+		pkgs = append(pkgs, p)
+	}
+	jars := make([]LockedJAR, 0, len(lf.JARs))
+	for _, j := range lf.JARs {
+		if j.Scope == "dev" {
+			continue
+		}
+		jars = append(jars, j)
+	}
+	return pkgs, jars
 }

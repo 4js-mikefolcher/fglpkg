@@ -80,8 +80,21 @@
       "additionalProperties": { "type": "string" }
     },
     "dependencies": {
+      "$ref": "#/definitions/dependencyBucket",
+      "description": "Production dependencies — required at runtime by consumers of this package. Keys must be \"fgl\" or \"java\"."
+    },
+    "devDependencies": {
+      "$ref": "#/definitions/dependencyBucket",
+      "description": "Development-only dependencies for the root project (test harnesses, linters, etc.). Never pulled in transitively when another project depends on this package."
+    },
+    "optionalDependencies": {
+      "$ref": "#/definitions/dependencyBucket",
+      "description": "Dependencies that are attempted like production deps but whose failure to resolve or download only emits a warning."
+    }
+  },
+  "definitions": {
+    "dependencyBucket": {
       "type": "object",
-      "description": "FGL and Java dependencies. Keys must be \"fgl\" or \"java\" only; putting package names directly under dependencies is rejected by the parser.",
       "additionalProperties": false,
       "properties": {
         "fgl": {
@@ -98,9 +111,7 @@
           "items": { "$ref": "#/definitions/javaDependency" }
         }
       }
-    }
-  },
-  "definitions": {
+    },
     "javaDependency": {
       "type": "object",
       "description": "A Maven-coordinates Java JAR dependency.",

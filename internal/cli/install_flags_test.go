@@ -1,0 +1,90 @@
+package cli
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
+)
+
+func TestParseInstallFlagsDefaults(t *testing.T) {
+	f, err := parseInstallFlags([]string{"pkg1", "pkg2"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if f.scope != manifest.ScopeProd {
+		t.Errorf("default scope: got %q, want %q", f.scope, manifest.ScopeProd)
+	}
+	if f.production {
+		t.Error("default should not be production")
+	}
+	if len(f.pkgs) != 2 || f.pkgs[0] != "pkg1" || f.pkgs[1] != "pkg2" {
+		t.Errorf("pkgs: %v", f.pkgs)
+	}
+}
+
+func TestParseInstallFlagsSaveDev(t *testing.T) {
+	for _, a := range []string{"--save-dev", "-D"} {
+		f, err := parseInstallFlags([]string{a, "tester"})
+		if err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
+		if f.scope != manifest.ScopeDev {
+			t.Errorf("%s: scope got %q", a, f.scope)
+		}
+	}
+}
+
+func TestParseInstallFlagsSaveOptional(t *testing.T) {
+	for _, a := range []string{"--save-optional", "-O"} {
+		f, err := parseInstallFlags([]string{a, "telemetry"})
+		if err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
+		if f.scope != manifest.ScopeOptional {
+			t.Errorf("%s: scope got %q", a, f.scope)
+		}
+	}
+}
+
+func TestParseInstallFlagsProduction(t *testing.T) {
+	for _, a := range []string{"--production", "--prod"} {
+		f, err := parseInstallFlags([]string{a})
+		if err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
+		if !f.production {
+			t.Errorf("%s: production not set", a)
+		}
+	}
+}
+
+func TestParseInstallFlagsConflicting(t *testing.T) {
+	cases := [][]string{
+		{"--save-dev", "--save-optional", "x"},
+		{"--production", "--save-dev", "x"},
+		{"--production", "--save-optional", "x"},
+	}
+	for _, args := range cases {
+		if _, err := parseInstallFlags(args); err == nil {
+			t.Errorf("args %v: expected error, got nil", args)
+		} else if !strings.Contains(err.Error(), "mutually exclusive") && !strings.Contains(err.Error(), "cannot be combined") {
+			t.Errorf("args %v: error message unexpected: %v", args, err)
+		}
+	}
+}
+
+// Local/global/force flags continue to parse the same way through the install
+// parser, so existing callers keep working.
+func TestParseInstallFlagsKeepsLocalGlobalForce(t *testing.T) {
+	f, err := parseInstallFlags([]string{"--local", "--force", "pkg"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !f.local || !f.force {
+		t.Errorf("local=%v force=%v", f.local, f.force)
+	}
+	if len(f.pkgs) != 1 || f.pkgs[0] != "pkg" {
+		t.Errorf("pkgs: %v", f.pkgs)
+	}
+}

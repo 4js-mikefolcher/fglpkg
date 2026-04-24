@@ -37,6 +37,10 @@ type ResolvedPackage struct {
 	Checksum    string
 	// RequiredBy lists the packages that introduced this dependency.
 	RequiredBy []string
+	// Scope is the resolved dependency scope: prod, dev, or optional.
+	// When a package is reachable via multiple paths the strongest scope
+	// wins: prod beats optional beats dev.
+	Scope manifest.Scope
 }
 
 // LocalMember describes a workspace member satisfying a local dependency.
@@ -50,8 +54,51 @@ type LocalMember struct {
 type Plan struct {
 	Packages      []ResolvedPackage
 	JARs          []manifest.JavaDependency
+	JARScopes     map[string]manifest.Scope // jar key → scope (empty key absent == prod)
 	LocalMembers  []LocalMember
 	GeneroVersion genero.Version
+	// OptionalSkipped lists optional packages that could not be resolved or
+	// downloaded. Populated only when Options.IncludeOptional is true.
+	OptionalSkipped []string
+}
+
+// ResolveOptions controls which root-level dependency scopes contribute to
+// resolution. Transitive dependencies of packages are always treated as
+// production — a library's devDependencies are never pulled in by consumers.
+type ResolveOptions struct {
+	IncludeDev      bool
+	IncludeOptional bool
+}
+
+// DefaultResolveOptions includes dev + optional (the developer workflow).
+// `fglpkg install --production` uses {IncludeDev: false, IncludeOptional: true}.
+func DefaultResolveOptions() ResolveOptions {
+	return ResolveOptions{IncludeDev: true, IncludeOptional: true}
+}
+
+// scopeRank returns a numeric ranking for scope promotion. Higher wins.
+//
+//	prod (3) > optional (2) > dev (1)
+//
+// A package reached via any prod path is installed in production; reaching
+// the same package only via dev paths allows `--production` to skip it.
+func scopeRank(s manifest.Scope) int {
+	switch s {
+	case manifest.ScopeProd:
+		return 3
+	case manifest.ScopeOptional:
+		return 2
+	case manifest.ScopeDev:
+		return 1
+	}
+	return 3 // unknown/empty treated as prod
+}
+
+func strongerScope(a, b manifest.Scope) manifest.Scope {
+	if scopeRank(a) >= scopeRank(b) {
+		return a
+	}
+	return b
 }
 
 // Conflict describes a version conflict between two or more requirers.
@@ -131,9 +178,17 @@ func (r *Resolver) WithWorkspace(ws *workspace.Workspace) *Resolver {
 	return r
 }
 
-// Resolve resolves all transitive dependencies of the given root manifest.
-// Returns a Plan or an error (which may be a *ConflictList).
+// Resolve resolves all transitive dependencies of the given root manifest
+// using DefaultResolveOptions (dev + optional included).
 func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
+	return r.ResolveWithOptions(root, DefaultResolveOptions())
+}
+
+// ResolveWithOptions resolves all transitive dependencies with control over
+// which root-level scopes contribute. Transitive deps always use production.
+// Optional deps whose fetch/resolve fails are recorded in Plan.OptionalSkipped
+// rather than aborting resolution.
+func (r *Resolver) ResolveWithOptions(root *manifest.Manifest, opts ResolveOptions) (*Plan, error) {
 	if ok, err := r.generoVersion.Satisfies(root.GeneroConstraint); err != nil {
 		return nil, fmt.Errorf("invalid genero constraint in root manifest: %w", err)
 	} else if !ok {
@@ -145,35 +200,12 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 
 	state := newState()
 
-	for name, constraint := range root.Dependencies.FGL {
-		if r.ws != nil && r.ws.IsLocal(name) {
-			member := r.ws.Member(name)
-			state.addLocalMember(LocalMember{
-				Name:    member.Manifest.Name,
-				Version: member.Manifest.Version,
-				Path:    member.Path,
-			})
-			for depName, depConstraint := range member.Manifest.Dependencies.FGL {
-				if r.ws.IsLocal(depName) {
-					localDep := r.ws.Member(depName)
-					state.addLocalMember(LocalMember{
-						Name:    localDep.Manifest.Name,
-						Version: localDep.Manifest.Version,
-						Path:    localDep.Path,
-					})
-				} else {
-					state.enqueue(workItem{name: depName, constraint: depConstraint, requiredBy: name})
-				}
-			}
-			for _, jar := range member.Manifest.Dependencies.Java {
-				state.addJAR(jar)
-			}
-			continue
-		}
-		state.enqueue(workItem{name: name, constraint: constraint, requiredBy: "<root>"})
+	r.enqueueRootBucket(root.Dependencies, manifest.ScopeProd, state)
+	if opts.IncludeDev {
+		r.enqueueRootBucket(root.DevDependencies, manifest.ScopeDev, state)
 	}
-	for _, dep := range root.Dependencies.Java {
-		state.addJAR(dep)
+	if opts.IncludeOptional {
+		r.enqueueRootBucket(root.OptionalDependencies, manifest.ScopeOptional, state)
 	}
 
 	for state.hasWork() {
@@ -190,6 +222,7 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 		}
 
 		if state.isResolved(item.name) {
+			state.promoteScope(item.name, item.scope)
 			if err := state.addConstraint(item.name, item.constraint, item.requiredBy); err != nil {
 				state.addConflict(err.(Conflict))
 			}
@@ -203,6 +236,10 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 
 		candidates, err := r.fetchVersions(item.name)
 		if err != nil {
+			if item.scope == manifest.ScopeOptional {
+				state.skipOptional(item.name, fmt.Sprintf("fetch versions: %v", err))
+				continue
+			}
 			return nil, fmt.Errorf("failed to fetch versions for %q: %w", item.name, err)
 		}
 
@@ -211,6 +248,10 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 			return nil, err
 		}
 		if len(generoCompatible) == 0 {
+			if item.scope == manifest.ScopeOptional {
+				state.skipOptional(item.name, fmt.Sprintf("no version compatible with Genero %s", r.generoVersion))
+				continue
+			}
 			return nil, fmt.Errorf(
 				"no version of %q is compatible with Genero %s",
 				item.name, r.generoVersion,
@@ -219,6 +260,10 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 
 		chosen, err := state.bestVersion(item.name, generoCompatible)
 		if err != nil {
+			if item.scope == manifest.ScopeOptional {
+				state.skipOptional(item.name, fmt.Sprintf("no version satisfies constraints: %v", err))
+				continue
+			}
 			state.addConflict(Conflict{
 				Package:     item.name,
 				Constraints: state.constraints[item.name],
@@ -228,10 +273,14 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 
 		info, err := r.fetchInfo(item.name, chosen.String(), r.generoVersion.MajorString())
 		if err != nil {
+			if item.scope == manifest.ScopeOptional {
+				state.skipOptional(item.name, fmt.Sprintf("fetch info: %v", err))
+				continue
+			}
 			return nil, fmt.Errorf("failed to fetch info for %s@%s: %w", item.name, chosen, err)
 		}
 
-		state.markResolved(item.name, chosen, info)
+		state.markResolved(item.name, chosen, info, item.scope)
 
 		for depName, depConstraint := range info.FGLDeps {
 			if r.ws != nil && r.ws.IsLocal(depName) {
@@ -244,15 +293,16 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 				continue
 			}
 			if state.isResolved(depName) {
+				state.promoteScope(depName, item.scope)
 				if err := state.checkExistingResolution(depName, depConstraint, item.name); err != nil {
 					state.addConflict(err.(Conflict))
 				}
 				continue
 			}
-			state.enqueue(workItem{name: depName, constraint: depConstraint, requiredBy: item.name})
+			state.enqueue(workItem{name: depName, constraint: depConstraint, requiredBy: item.name, scope: item.scope})
 		}
 		for _, jar := range info.JavaDeps {
-			state.addJAR(jar)
+			state.addJARScoped(jar, item.scope)
 		}
 	}
 
@@ -263,6 +313,42 @@ func (r *Resolver) Resolve(root *manifest.Manifest) (*Plan, error) {
 	plan := state.buildPlan()
 	plan.GeneroVersion = r.generoVersion
 	return plan, nil
+}
+
+// enqueueRootBucket adds a single scope's root dependencies to the work queue.
+// Workspace-local members short-circuit to disk; their own (production) deps
+// are walked with the same root scope.
+func (r *Resolver) enqueueRootBucket(deps manifest.Dependencies, scope manifest.Scope, state *state) {
+	for name, constraint := range deps.FGL {
+		if r.ws != nil && r.ws.IsLocal(name) {
+			member := r.ws.Member(name)
+			state.addLocalMember(LocalMember{
+				Name:    member.Manifest.Name,
+				Version: member.Manifest.Version,
+				Path:    member.Path,
+			})
+			for depName, depConstraint := range member.Manifest.Dependencies.FGL {
+				if r.ws.IsLocal(depName) {
+					localDep := r.ws.Member(depName)
+					state.addLocalMember(LocalMember{
+						Name:    localDep.Manifest.Name,
+						Version: localDep.Manifest.Version,
+						Path:    localDep.Path,
+					})
+				} else {
+					state.enqueue(workItem{name: depName, constraint: depConstraint, requiredBy: name, scope: scope})
+				}
+			}
+			for _, jar := range member.Manifest.Dependencies.Java {
+				state.addJARScoped(jar, scope)
+			}
+			continue
+		}
+		state.enqueue(workItem{name: name, constraint: constraint, requiredBy: "<root>", scope: scope})
+	}
+	for _, dep := range deps.Java {
+		state.addJARScoped(dep, scope)
+	}
 }
 
 // filterByGenero removes candidate versions whose GeneroConstraint is not
@@ -306,22 +392,26 @@ type workItem struct {
 	name       string
 	constraint string
 	requiredBy string
+	scope      manifest.Scope
 }
 
 type resolvedEntry struct {
 	version semver.Version
 	info    *registry.PackageInfo
 	order   int
+	scope   manifest.Scope
 }
 
 type state struct {
-	queue        []workItem
-	constraints  map[string][]constraintSource
-	resolved     map[string]*resolvedEntry
-	jars         map[string]manifest.JavaDependency
-	localMembers map[string]LocalMember
-	conflicts    []Conflict
-	orderSeq     int
+	queue           []workItem
+	constraints     map[string][]constraintSource
+	resolved        map[string]*resolvedEntry
+	jars            map[string]manifest.JavaDependency
+	jarScopes       map[string]manifest.Scope
+	localMembers    map[string]LocalMember
+	conflicts       []Conflict
+	orderSeq        int
+	optionalSkipped []string
 }
 
 func newState() *state {
@@ -329,8 +419,26 @@ func newState() *state {
 		constraints:  make(map[string][]constraintSource),
 		resolved:     make(map[string]*resolvedEntry),
 		jars:         make(map[string]manifest.JavaDependency),
+		jarScopes:    make(map[string]manifest.Scope),
 		localMembers: make(map[string]LocalMember),
 	}
+}
+
+// promoteScope updates a resolved package's scope if the new scope is stronger.
+// Called when a second path reaches an already-resolved package.
+func (s *state) promoteScope(name string, candidate manifest.Scope) {
+	entry, ok := s.resolved[name]
+	if !ok {
+		return
+	}
+	entry.scope = strongerScope(entry.scope, candidate)
+}
+
+// skipOptional records an optional-scope package whose resolution was aborted
+// because of a fetch/download/compat failure. Suppresses the hard error.
+func (s *state) skipOptional(name, reason string) {
+	s.optionalSkipped = append(s.optionalSkipped, fmt.Sprintf("%s (%s)", name, reason))
+	fmt.Fprintf(os.Stderr, "warning: skipping optional dependency %s: %s\n", name, reason)
 }
 
 func (s *state) enqueue(item workItem)        { s.queue = append(s.queue, item) }
@@ -395,14 +503,17 @@ func (s *state) checkExistingResolution(name, newConstraint, requiredBy string) 
 	return nil
 }
 
-func (s *state) markResolved(name string, v semver.Version, info *registry.PackageInfo) {
-	s.resolved[name] = &resolvedEntry{version: v, info: info, order: s.orderSeq}
+func (s *state) markResolved(name string, v semver.Version, info *registry.PackageInfo, scope manifest.Scope) {
+	s.resolved[name] = &resolvedEntry{version: v, info: info, order: s.orderSeq, scope: scope}
 	s.orderSeq++
 }
 
 func (s *state) addConflict(c Conflict) { s.conflicts = append(s.conflicts, c) }
 
-func (s *state) addJAR(dep manifest.JavaDependency) {
+// addJARScoped adds a JAR and promotes its scope. When the same JAR appears
+// at different versions the higher version wins. Scope promotion follows the
+// same prod > optional > dev ordering as BDL packages.
+func (s *state) addJARScoped(dep manifest.JavaDependency, scope manifest.Scope) {
 	key := dep.Key()
 	if existing, ok := s.jars[key]; ok {
 		ev, _ := semver.Parse(existing.Version)
@@ -413,6 +524,7 @@ func (s *state) addJAR(dep manifest.JavaDependency) {
 	} else {
 		s.jars[key] = dep
 	}
+	s.jarScopes[key] = strongerScope(s.jarScopes[key], scope)
 }
 
 func (s *state) buildPlan() *Plan {
@@ -428,6 +540,7 @@ func (s *state) buildPlan() *Plan {
 			DownloadURL: entry.info.DownloadURL,
 			Checksum:    entry.info.Checksum,
 			RequiredBy:  requiredBy,
+			Scope:       entry.scope,
 		})
 	}
 	for i := 1; i < len(pkgs); i++ {
@@ -446,7 +559,18 @@ func (s *state) buildPlan() *Plan {
 		locals = append(locals, lm)
 	}
 
-	return &Plan{Packages: pkgs, JARs: jars, LocalMembers: locals}
+	scopes := make(map[string]manifest.Scope, len(s.jarScopes))
+	for k, v := range s.jarScopes {
+		scopes[k] = v
+	}
+
+	return &Plan{
+		Packages:        pkgs,
+		JARs:            jars,
+		JARScopes:       scopes,
+		LocalMembers:    locals,
+		OptionalSkipped: s.optionalSkipped,
+	}
 }
 
 // ─── Live registry fetchers ───────────────────────────────────────────────────

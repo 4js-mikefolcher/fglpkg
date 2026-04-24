@@ -126,9 +126,12 @@ func cmdInit(_ []string) error {
 // ─── install ──────────────────────────────────────────────────────────────────
 
 func cmdInstall(args []string) error {
-	pkgArgs, forceLocal, forceGlobal, forceReload := parseFlags(args)
+	flags, err := parseInstallFlags(args)
+	if err != nil {
+		return err
+	}
 
-	home, isLocal, err := resolveHome(forceLocal, forceGlobal)
+	home, isLocal, err := resolveHome(flags.local, flags.global)
 	if err != nil {
 		return err
 	}
@@ -140,7 +143,7 @@ func cmdInstall(args []string) error {
 		fmt.Println("  Tip: add .fglpkg/ to your .gitignore file")
 	}
 
-	if forceReload {
+	if flags.force {
 		if !isLocal {
 			return fmt.Errorf("--force is only supported for local installs; re-run inside a project directory or with --local")
 		}
@@ -149,7 +152,9 @@ func cmdInstall(args []string) error {
 		}
 	}
 
-	if len(pkgArgs) == 0 {
+	instOpts := installer.Options{Production: flags.production}
+
+	if len(flags.pkgs) == 0 {
 		m, err := manifest.Load(".")
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -157,7 +162,10 @@ func cmdInstall(args []string) error {
 			}
 			return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
 		}
-		return inst.InstallAll(m, projectDir, forceReload)
+		if flags.production {
+			fmt.Println("Installing in production mode (devDependencies will be skipped)")
+		}
+		return inst.InstallAllWithOptions(m, projectDir, flags.force, instOpts)
 	}
 
 	m, err := manifest.LoadOrNew(".")
@@ -170,7 +178,8 @@ func cmdInstall(args []string) error {
 	}
 	generoMajor := gv.MajorString()
 
-	for _, pkg := range pkgArgs {
+	scopeLabel := scopeDisplayName(flags.scope)
+	for _, pkg := range flags.pkgs {
 		name, version, err := parsePackageArg(pkg)
 		if err != nil {
 			return err
@@ -180,14 +189,26 @@ func cmdInstall(args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to resolve %s@%s: %w", name, version, err)
 		}
-		m.AddFGLDependency(info.Name, info.Version)
-		fmt.Printf("✓ Added %s@%s to %s\n", info.Name, info.Version, manifest.Filename)
+		m.AddFGLDependencyScoped(info.Name, info.Version, flags.scope)
+		fmt.Printf("✓ Added %s@%s to %s [%s]\n", info.Name, info.Version, manifest.Filename, scopeLabel)
 	}
 	if err := m.Save("."); err != nil {
 		return err
 	}
 	fmt.Println()
-	return inst.InstallAll(m, projectDir, true)
+	return inst.InstallAllWithOptions(m, projectDir, true, instOpts)
+}
+
+// scopeDisplayName returns a short user-facing label for a manifest.Scope.
+func scopeDisplayName(s manifest.Scope) string {
+	switch s {
+	case manifest.ScopeDev:
+		return "devDependencies"
+	case manifest.ScopeOptional:
+		return "optionalDependencies"
+	default:
+		return "dependencies"
+	}
 }
 
 // resolveHome returns the fglpkg home directory based on context:
@@ -267,6 +288,55 @@ func parseFlags(args []string) (remaining []string, local, global, force bool) {
 	return
 }
 
+// installFlags holds the parsed flags specific to `fglpkg install`, on top of
+// the shared local/global/force flags. Scope is one of manifest.ScopeProd
+// (default), ScopeDev, or ScopeOptional, reflecting where newly added
+// packages should be recorded.
+type installFlags struct {
+	local      bool
+	global     bool
+	force      bool
+	production bool
+	scope      manifest.Scope
+	pkgs       []string
+}
+
+// parseInstallFlags extends parseFlags with --save-dev/-D, --save-optional/-O,
+// and --production/--prod flags. It rejects conflicting combinations.
+func parseInstallFlags(args []string) (installFlags, error) {
+	f := installFlags{scope: manifest.ScopeProd}
+	devSeen, optSeen := false, false
+	for _, a := range args {
+		switch a {
+		case "--local", "-l":
+			f.local = true
+		case "--global", "-g":
+			f.global = true
+		case "--force", "-f":
+			f.force = true
+		case "--production", "--prod":
+			f.production = true
+		case "--save-dev", "-D":
+			devSeen = true
+			f.scope = manifest.ScopeDev
+		case "--save-optional", "-O":
+			optSeen = true
+			f.scope = manifest.ScopeOptional
+		case "--save-prod", "-P":
+			f.scope = manifest.ScopeProd
+		default:
+			f.pkgs = append(f.pkgs, a)
+		}
+	}
+	if devSeen && optSeen {
+		return f, fmt.Errorf("--save-dev and --save-optional are mutually exclusive")
+	}
+	if f.production && (devSeen || optSeen) {
+		return f, fmt.Errorf("--production cannot be combined with --save-dev or --save-optional")
+	}
+	return f, nil
+}
+
 // ─── remove ───────────────────────────────────────────────────────────────────
 
 func cmdRemove(args []string) error {
@@ -287,8 +357,11 @@ func cmdRemove(args []string) error {
 		if err := inst.Remove(pkg); err != nil {
 			return fmt.Errorf("failed to remove %s: %w", pkg, err)
 		}
-		m.RemoveFGLDependency(pkg)
-		fmt.Printf("✓ Removed %s\n", pkg)
+		if scope := m.RemoveFGLDependency(pkg); scope != "" {
+			fmt.Printf("✓ Removed %s from %s\n", pkg, scopeDisplayName(scope))
+		} else {
+			fmt.Printf("✓ Removed %s (not declared in manifest)\n", pkg)
+		}
 	}
 	return m.Save(".")
 }
@@ -1794,8 +1867,13 @@ FLAGS (for install, remove, update, list, env):
   (default)         Auto-detect: local if .fglpkg/ or fglpkg.json exists
 
 FLAGS (for install only):
-  --force, -f       Delete fglpkg.lock and .fglpkg/ first, then re-download
-                    every package from the registry (local installs only)
+  --force, -f           Delete fglpkg.lock and .fglpkg/ first, then re-download
+                        every package from the registry (local installs only)
+  --save-dev, -D        Record added packages under "devDependencies"
+  --save-optional, -O   Record added packages under "optionalDependencies"
+  --save-prod, -P       Record added packages under "dependencies" (default)
+  --production, --prod  Skip devDependencies when installing (optional deps
+                        are still attempted)
 
 FLAGS (for env only):
   --gst             Output in Genero Studio format (implies --local)
