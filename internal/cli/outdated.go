@@ -1,0 +1,239 @@
+package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+
+	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
+	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
+	"github.com/4js-mikefolcher/fglpkg/internal/registry"
+	"github.com/4js-mikefolcher/fglpkg/internal/semver"
+)
+
+// outdatedRow describes one dependency's upgrade status.
+type outdatedRow struct {
+	Name       string `json:"name"`
+	Constraint string `json:"constraint"`
+	Current    string `json:"current"`
+	Wanted     string `json:"wanted"`
+	Latest     string `json:"latest"`
+	Status     string `json:"status"`
+}
+
+// cmdOutdated compares each FGL dependency declared in fglpkg.json
+// against the registry, reporting which ones have newer versions
+// available. The command exits non-zero if any dependency is outdated,
+// so it can be used as a CI gate.
+//
+//	fglpkg outdated                    → table output to stdout
+//	fglpkg outdated --json             → JSON array to stdout
+//
+// Java dependencies are not included; they have exact version pins and
+// would require a separate Maven Central query.
+func cmdOutdated(args []string) error {
+	var jsonOut bool
+	for _, a := range args {
+		switch a {
+		case "--json":
+			jsonOut = true
+		default:
+			return fmt.Errorf("unknown argument %q", a)
+		}
+	}
+
+	m, err := manifest.Load(".")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no %s in current directory", manifest.Filename)
+		}
+		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
+	}
+	if len(m.Dependencies.FGL) == 0 {
+		fmt.Println("No FGL dependencies declared.")
+		return nil
+	}
+
+	// Current versions come from the lockfile — the deterministic record
+	// of what was last installed. If the lockfile is missing we still
+	// fetch registry data and mark everything as "not installed".
+	projectDir, _ := os.Getwd()
+	current := map[string]string{}
+	if lockfile.Exists(projectDir) {
+		lf, err := lockfile.Load(projectDir)
+		if err == nil {
+			for _, p := range lf.Packages {
+				current[p.Name] = p.Version
+			}
+		}
+	}
+
+	names := make([]string, 0, len(m.Dependencies.FGL))
+	for n := range m.Dependencies.FGL {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	rows := make([]outdatedRow, 0, len(names))
+	outdatedCount := 0
+
+	for _, name := range names {
+		row := buildOutdatedRow(name, m.Dependencies.FGL[name], current[name])
+		rows = append(rows, row)
+		if row.Status != "ok" {
+			outdatedCount++
+		}
+	}
+
+	if jsonOut {
+		data, err := json.MarshalIndent(rows, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+	} else {
+		printOutdatedTable(rows)
+	}
+
+	if outdatedCount > 0 {
+		plural := ""
+		if outdatedCount > 1 {
+			plural = "s"
+		}
+		return fmt.Errorf("%d dependenc%s out of date", outdatedCount, pluralY(outdatedCount)+plural)
+	}
+	return nil
+}
+
+// buildOutdatedRow fetches the version list for one package and computes
+// its current/wanted/latest/status fields.
+func buildOutdatedRow(name, constraint, currentVer string) outdatedRow {
+	row := outdatedRow{
+		Name:       name,
+		Constraint: constraint,
+		Current:    currentVer,
+	}
+	if row.Current == "" {
+		row.Current = "missing"
+	}
+
+	vl, err := registry.FetchVersionList(name)
+	if err != nil {
+		row.Status = "registry error"
+		return row
+	}
+
+	candidates := parseVersionStrings(vl.Versions)
+	if len(candidates) == 0 {
+		row.Status = "no published versions"
+		return row
+	}
+
+	// Latest stable (release, not prerelease) — what a user would get
+	// if they widened their constraint.
+	if latest := newestStable(candidates); latest != nil {
+		row.Latest = latest.String()
+	} else {
+		// No stable versions — fall back to the absolute newest.
+		row.Latest = newest(candidates).String()
+	}
+
+	// Wanted = newest version satisfying the declared constraint.
+	if c, err := semver.ParseConstraint(constraint); err == nil {
+		if w, err := c.Latest(candidates); err == nil {
+			row.Wanted = w.String()
+		}
+	}
+
+	switch {
+	case currentVer == "":
+		row.Status = "not installed"
+	case row.Wanted != "" && row.Wanted != currentVer:
+		row.Status = "update available"
+	case row.Latest != "" && row.Latest != currentVer:
+		// Current satisfies the constraint, but a newer stable exists
+		// outside the constraint (typically a major bump).
+		row.Status = "major available"
+	default:
+		row.Status = "ok"
+	}
+	return row
+}
+
+func parseVersionStrings(vs []string) []semver.Version {
+	out := make([]semver.Version, 0, len(vs))
+	for _, s := range vs {
+		if v, err := semver.Parse(s); err == nil {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func newest(vs []semver.Version) *semver.Version {
+	if len(vs) == 0 {
+		return nil
+	}
+	best := vs[0]
+	for i := 1; i < len(vs); i++ {
+		if vs[i].GreaterThan(best) {
+			best = vs[i]
+		}
+	}
+	return &best
+}
+
+func newestStable(vs []semver.Version) *semver.Version {
+	stable := make([]semver.Version, 0, len(vs))
+	for _, v := range vs {
+		if v.PreRelease == "" {
+			stable = append(stable, v)
+		}
+	}
+	return newest(stable)
+}
+
+func printOutdatedTable(rows []outdatedRow) {
+	headers := []string{"Package", "Current", "Wanted", "Latest", "Status"}
+	cells := make([][]string, len(rows))
+	for i, r := range rows {
+		cells[i] = []string{r.Name, r.Current, r.Wanted, r.Latest, r.Status}
+	}
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = len(h)
+	}
+	for _, row := range cells {
+		for i, c := range row {
+			if len(c) > widths[i] {
+				widths[i] = len(c)
+			}
+		}
+	}
+
+	printRow := func(cols []string) {
+		parts := make([]string, len(cols))
+		for i, c := range cols {
+			parts[i] = fmt.Sprintf("%-*s", widths[i], c)
+		}
+		fmt.Println(strings.TrimRight(strings.Join(parts, "  "), " "))
+	}
+	printRow(headers)
+	divider := make([]string, len(headers))
+	for i, w := range widths {
+		divider[i] = strings.Repeat("─", w)
+	}
+	printRow(divider)
+	for _, row := range cells {
+		printRow(row)
+	}
+}
+
+func pluralY(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ie"
+}

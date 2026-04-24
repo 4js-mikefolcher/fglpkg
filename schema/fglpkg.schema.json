@@ -1,0 +1,137 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://fglpkg.io/schema/v1/fglpkg.schema.json",
+  "title": "fglpkg manifest",
+  "description": "Schema for fglpkg.json — the package manifest used by the fglpkg CLI and registry.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "version"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema reference so editors can provide autocomplete and validation."
+    },
+    "name": {
+      "type": "string",
+      "description": "Package name. Must be unique within a registry; conventionally lowercase with no spaces.",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "version": {
+      "type": "string",
+      "description": "Package version in semver form (MAJOR.MINOR.PATCH, optionally with -prerelease).",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+    },
+    "description": {
+      "type": "string",
+      "description": "One-line summary shown by `fglpkg search` and `fglpkg info`."
+    },
+    "author": {
+      "type": "string",
+      "description": "Package author (name, email, or Name <email@example.com>)."
+    },
+    "license": {
+      "type": "string",
+      "description": "SPDX license identifier (e.g. MIT, Apache-2.0) or a custom string."
+    },
+    "repository": {
+      "type": "string",
+      "description": "URL of the source repository (e.g. https://github.com/org/repo)."
+    },
+    "main": {
+      "type": "string",
+      "description": "Primary .42m entry point for this package."
+    },
+    "genero": {
+      "type": "string",
+      "description": "Semver constraint for Genero BDL runtime compatibility (e.g. \"^6.0.0\", \">=4.01 <7\"). Omit or use \"*\" to indicate any Genero version."
+    },
+    "root": {
+      "type": "string",
+      "description": "Base directory for package files, relative to this manifest. Defaults to \".\"."
+    },
+    "files": {
+      "type": "array",
+      "description": "Glob patterns of files to include in the published zip. Defaults to [\"*.42m\", \"*.42f\", \"*.sch\"] when omitted.",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "bin": {
+      "type": "object",
+      "description": "Command-line scripts shipped with the package. Keys are command names; values are paths to executable scripts relative to the package root.",
+      "additionalProperties": { "type": "string" }
+    },
+    "docs": {
+      "type": "array",
+      "description": "Glob patterns of documentation files to include in the published zip (e.g. [\"README.md\", \"docs/**/*.md\"]).",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "programs": {
+      "type": "array",
+      "description": "Module names (without .42m) that declare MAIN blocks and can be launched via `fglpkg bdl`.",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "scripts": {
+      "type": "object",
+      "description": "Reserved for declarative lifecycle steps (preinstall, postinstall, prepublish, postpublish, preuninstall). Currently defined but not executed; behaviour is still being designed.",
+      "additionalProperties": { "type": "string" }
+    },
+    "dependencies": {
+      "type": "object",
+      "description": "FGL and Java dependencies. Keys must be \"fgl\" or \"java\" only; putting package names directly under dependencies is rejected by the parser.",
+      "additionalProperties": false,
+      "properties": {
+        "fgl": {
+          "type": "object",
+          "description": "BDL package dependencies. Keys are package names; values are semver constraint strings (e.g. \"^1.2.0\", \">=1.0.0 <2.0.0\").",
+          "additionalProperties": {
+            "type": "string",
+            "description": "Semver constraint for this dependency."
+          }
+        },
+        "java": {
+          "type": "array",
+          "description": "Java JAR dependencies, resolved from Maven Central unless \"url\" overrides it.",
+          "items": { "$ref": "#/definitions/javaDependency" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "javaDependency": {
+      "type": "object",
+      "description": "A Maven-coordinates Java JAR dependency.",
+      "additionalProperties": false,
+      "required": ["groupId", "artifactId", "version"],
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "description": "Maven groupId, e.g. \"com.example\"."
+        },
+        "artifactId": {
+          "type": "string",
+          "description": "Maven artifactId, e.g. \"my-library\"."
+        },
+        "version": {
+          "type": "string",
+          "description": "Exact Maven version, e.g. \"1.2.3\". Ranges are not supported for Java deps."
+        },
+        "checksum": {
+          "type": "string",
+          "description": "Optional SHA256 hex digest of the JAR. When present, the downloaded JAR is verified. When absent, Maven Central is trusted without integrity checks."
+        },
+        "jar": {
+          "type": "string",
+          "description": "Override the computed JAR filename. Defaults to \"<artifactId>-<version>.jar\"."
+        },
+        "url": {
+          "type": "string",
+          "description": "Override the Maven Central URL entirely. Useful for mirrors or non-standard repositories."
+        }
+      }
+    }
+  }
+}

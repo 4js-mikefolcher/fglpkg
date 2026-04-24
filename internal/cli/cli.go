@@ -63,8 +63,16 @@ func Execute() error {
 		return cmdEnv(args)
 	case "search":
 		return cmdSearch(args)
+	case "info", "view":
+		return cmdInfo(args)
+	case "outdated":
+		return cmdOutdated(args)
+	case "completion":
+		return cmdCompletion(args)
 	case "publish":
 		return cmdPublish(args)
+	case "pack":
+		return cmdPack(args)
 	case "unpublish":
 		return cmdUnpublish(args)
 	case "login":
@@ -88,8 +96,7 @@ func Execute() error {
 	case "docs":
 		return cmdDocs(args)
 	case "version":
-		fmt.Printf("fglpkg version %s (build %s)\n", Version, Build)
-		return nil
+		return cmdVersion(args)
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
@@ -394,7 +401,17 @@ func cmdSearch(args []string) error {
 
 // ─── publish ──────────────────────────────────────────────────────────────────
 
-func cmdPublish(_ []string) error {
+func cmdPublish(args []string) error {
+	var dryRun bool
+	for _, a := range args {
+		switch a {
+		case "--dry-run", "-n":
+			dryRun = true
+		default:
+			return fmt.Errorf("unexpected argument %q", a)
+		}
+	}
+
 	home, err := fglpkgHome()
 	if err != nil {
 		return err
@@ -426,15 +443,22 @@ func cmdPublish(_ []string) error {
 	}
 	generoMajor := gv.MajorString()
 
+	if dryRun {
+		fmt.Printf("DRY RUN — no network calls will be made\n\n")
+	}
 	fmt.Printf("Publishing %s@%s (Genero %s variant) to %s...\n", m.Name, m.Version, generoMajor, registryURL)
-	if err := publishPackage(m, token, registryURL, githubToken, owner, repo, generoMajor); err != nil {
+	if err := publishPackage(m, token, registryURL, githubToken, owner, repo, generoMajor, dryRun); err != nil {
 		return fmt.Errorf("publish failed: %w", err)
 	}
-	fmt.Printf("✓ Published %s@%s\n", m.Name, m.Version)
+	if dryRun {
+		fmt.Printf("✓ Dry run complete for %s@%s — no changes made\n", m.Name, m.Version)
+	} else {
+		fmt.Printf("✓ Published %s@%s\n", m.Name, m.Version)
+	}
 	return nil
 }
 
-func publishPackage(m *manifest.Manifest, token, registryURL, githubToken, owner, repo, generoMajor string) error {
+func publishPackage(m *manifest.Manifest, token, registryURL, githubToken, owner, repo, generoMajor string, dryRun bool) error {
 	// 1. Build the zip.
 	zipData, checksum, err := buildPackageZip(m)
 	if err != nil {
@@ -442,22 +466,32 @@ func publishPackage(m *manifest.Manifest, token, registryURL, githubToken, owner
 	}
 	fmt.Printf("  Package zip: %d bytes (SHA256: %s)\n", len(zipData), checksum)
 
-	// 2. Upload to GitHub Releases.
+	// 2. Upload to GitHub Releases (or preview target in dry-run).
 	tag := gh.ReleaseTag(m.Name, m.Version)
 	assetName := gh.VariantAssetName(m.Name, m.Version, generoMajor)
 	title := fmt.Sprintf("%s v%s", m.Name, m.Version)
 
-	fmt.Printf("  Uploading to GitHub (%s/%s)...\n", owner, repo)
-	releaseID, err := gh.GetOrCreateRelease(githubToken, owner, repo, tag, title)
-	if err != nil {
-		return fmt.Errorf("GitHub release failed: %w", err)
+	var downloadURL string
+	if dryRun {
+		downloadURL = fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s",
+			owner, repo, tag, assetName)
+		fmt.Printf("  [dry-run] would upload to GitHub %s/%s\n", owner, repo)
+		fmt.Printf("            release tag:  %s\n", tag)
+		fmt.Printf("            release name: %s\n", title)
+		fmt.Printf("            asset name:   %s\n", assetName)
+		fmt.Printf("            download URL: %s\n", downloadURL)
+	} else {
+		fmt.Printf("  Uploading to GitHub (%s/%s)...\n", owner, repo)
+		releaseID, err := gh.GetOrCreateRelease(githubToken, owner, repo, tag, title)
+		if err != nil {
+			return fmt.Errorf("GitHub release failed: %w", err)
+		}
+		downloadURL, err = gh.UploadAsset(githubToken, owner, repo, releaseID, assetName, zipData)
+		if err != nil {
+			return fmt.Errorf("GitHub upload failed: %w", err)
+		}
+		fmt.Printf("  Uploaded to GitHub: %s\n", downloadURL)
 	}
-
-	downloadURL, err := gh.UploadAsset(githubToken, owner, repo, releaseID, assetName, zipData)
-	if err != nil {
-		return fmt.Errorf("GitHub upload failed: %w", err)
-	}
-	fmt.Printf("  Uploaded to GitHub: %s\n", downloadURL)
 
 	// 3. Register metadata with the registry (JSON-only, no zip).
 	meta := map[string]any{
@@ -473,13 +507,21 @@ func publishPackage(m *manifest.Manifest, token, registryURL, githubToken, owner
 	if len(m.Dependencies.Java) > 0 {
 		meta["javaDeps"] = m.Dependencies.Java
 	}
+
+	url := fmt.Sprintf("%s/packages/%s/%s/publish",
+		strings.TrimRight(registryURL, "/"), m.Name, m.Version)
+
+	if dryRun {
+		prettyMeta, _ := json.MarshalIndent(meta, "            ", "  ")
+		fmt.Printf("  [dry-run] would POST to %s\n", url)
+		fmt.Printf("            body:\n            %s\n", prettyMeta)
+		return nil
+	}
+
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		return err
 	}
-
-	url := fmt.Sprintf("%s/packages/%s/%s/publish",
-		strings.TrimRight(registryURL, "/"), m.Name, m.Version)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(metaJSON))
 	if err != nil {
 		return err
@@ -1724,8 +1766,14 @@ COMMANDS:
   list              List installed packages
   env               Print environment variable exports
   search <term>     Search the registry
+  info <pkg>[@ver]  Show registry metadata for a package (--json for raw output)
+  outdated          Show FGL deps with newer versions available (--json for JSON)
+  completion <sh>   Print shell completion script (bash|zsh|fish|powershell)
   bdl <pkg> <mod>   Run a BDL program from an installed package
-  publish           Publish current package to registry
+  publish [--dry-run] Publish current package to registry
+                    (--dry-run prints what would happen without calling out)
+  pack [-o file]    Build the publishable zip locally without uploading
+                    (--list prints contents without writing a file)
   unpublish <p>@<v> Remove a published version from registry + GitHub
   login             Save registry credentials
   logout            Remove saved credentials
@@ -1736,7 +1784,8 @@ COMMANDS:
   workspace         Manage monorepo workspaces
   run <command>     Run a script from an installed package
   docs <package>    List or view package documentation
-  version           Print fglpkg version
+  version [bump]    Print fglpkg version, or bump package version
+                    (bump = patch|minor|major|prerelease|<semver>, add --git to tag)
   help              Show this help
 
 FLAGS (for install, remove, update, list, env):

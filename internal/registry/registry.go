@@ -21,6 +21,9 @@ type PackageInfo struct {
 	Name             string                    `json:"name"`
 	Version          string                    `json:"version"`
 	Description      string                    `json:"description"`
+	Author           string                    `json:"author,omitempty"`
+	License          string                    `json:"license,omitempty"`
+	PublishedAt      string                    `json:"publishedAt,omitempty"`
 	DownloadURL      string                    `json:"downloadUrl"`
 	Checksum         string                    `json:"checksum"` // SHA256 hex
 	// GeneroConstraint declares which Genero BDL runtime versions this package
