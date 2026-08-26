@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -175,6 +176,226 @@ func TestBumpWithoutLockfileCreatesNone(t *testing.T) {
 	}
 	if lockfile.Exists(dir) {
 		t.Error("bump created a lockfile where none existed; it must not resolve")
+	}
+}
+
+// gitRun runs git in the current working directory, failing the test on error.
+func gitRun(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+// gitInitCommitted makes the current directory a repo with paths committed.
+// Signing is disabled locally so a developer's global commit.gpgsign cannot
+// make these tests prompt (or fail) on an unrelated machine.
+func gitInitCommitted(t *testing.T, paths ...string) {
+	t.Helper()
+	gitRun(t, "init")
+	gitRun(t, "config", "user.email", "test@example.com")
+	gitRun(t, "config", "user.name", "fglpkg tests")
+	gitRun(t, "config", "commit.gpgsign", "false")
+	gitRun(t, append([]string{"add", "--"}, paths...)...)
+	gitRun(t, "commit", "-m", "init")
+}
+
+// lockFixture is a lockfile with one resolved package and one JAR, so a test can
+// tell a field-only edit from a re-resolution. Written in the canonical form
+// Save emits, which makes a byte comparison meaningful.
+const lockFixture = `{
+  "lockfileVersion": 1,
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "generoVersion": "6.00.01",
+  "root": {
+    "name": "lock-sync",
+    "version": "1.2.3",
+    "declared": {
+      "dependencies": {
+        "fgl": {
+          "logger": "^1.0.0"
+        }
+      },
+      "devDependencies": {},
+      "optionalDependencies": {}
+    }
+  },
+  "packages": [
+    {
+      "name": "logger",
+      "version": "1.2.0",
+      "downloadUrl": "https://example.invalid/logger-1.2.0.zip",
+      "checksum": "sha256:deadbeef",
+      "requiredBy": [
+        "<root>"
+      ]
+    }
+  ],
+  "jars": []
+}
+`
+
+// writeBumpFixture lays down a manifest at version 1.2.3 plus, when lock is
+// non-empty, a lockfile, and chdirs into the result.
+func writeBumpFixture(t *testing.T, lock string) string {
+	t.Helper()
+	dir := t.TempDir()
+	raw := `{
+  "name": "lock-sync",
+  "version": "1.2.3",
+  "dependencies": { "fgl": { "logger": "^1.0.0" } }
+}`
+	if err := os.WriteFile(filepath.Join(dir, manifest.Filename), []byte(raw), 0644); err != nil {
+		t.Fatalf("setup manifest: %v", err)
+	}
+	if lock != "" {
+		if err := os.WriteFile(filepath.Join(dir, lockfile.Filename), []byte(lock), 0644); err != nil {
+			t.Fatalf("setup lock: %v", err)
+		}
+	}
+	chdirTest(t, dir)
+	return dir
+}
+
+// TestBumpPreservesResolvedLockEntries: the lock edit is a field-only one. Every
+// byte except root.version — generatedAt, the resolved package, the declared
+// snapshot — must come back unchanged, because a version bump moves no
+// constraint and so must not look like a re-resolution (GIS-492).
+func TestBumpPreservesResolvedLockEntries(t *testing.T) {
+	dir := writeBumpFixture(t, lockFixture)
+	if _, err := captureStdout(t, func() error { return cmdBump([]string{"patch"}) }); err != nil {
+		t.Fatalf("cmdBump: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, lockfile.Filename))
+	if err != nil {
+		t.Fatalf("reread lock: %v", err)
+	}
+	want := strings.Replace(lockFixture, `"version": "1.2.3"`, `"version": "1.2.4"`, 1)
+	if string(got) != want {
+		t.Errorf("lock changed beyond root.version:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestBumpGitCommitsManifestAndLock: under --git both files land in the one
+// commit the tag points at, so the tagged tree is self-consistent and no
+// modification is left behind in the working tree.
+func TestBumpGitCommitsManifestAndLock(t *testing.T) {
+	writeBumpFixture(t, lockFixture)
+	gitInitCommitted(t, manifest.Filename, lockfile.Filename)
+
+	if _, err := captureStdout(t, func() error { return cmdBump([]string{"patch", "--git"}) }); err != nil {
+		t.Fatalf("cmdBump --git: %v", err)
+	}
+	if out := gitRun(t, "status", "--porcelain"); strings.TrimSpace(out) != "" {
+		t.Errorf("working tree not clean after bump --git:\n%s", out)
+	}
+	if out := gitRun(t, "tag"); !strings.Contains(out, "v1.2.4") {
+		t.Errorf("tag v1.2.4 not created; tags = %q", out)
+	}
+	committed := gitRun(t, "show", "--name-only", "--format=", "HEAD")
+	for _, want := range []string{manifest.Filename, lockfile.Filename} {
+		if !strings.Contains(committed, want) {
+			t.Errorf("%s missing from the bump commit; it touched:\n%s", want, committed)
+		}
+	}
+}
+
+// TestBumpGitignoredLockDoesNotBlockCommit: a project that deliberately does not
+// commit its lock still gets a working `bump --git`. `git add` on an ignored path
+// is a hard error, so staging it unconditionally aborted the bump *after* the
+// manifest had been rewritten — and the resulting dirty tree then blocked the
+// retry on requireCleanGitTree.
+func TestBumpGitignoredLockDoesNotBlockCommit(t *testing.T) {
+	dir := writeBumpFixture(t, lockFixture)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(lockfile.Filename+"\n"), 0644); err != nil {
+		t.Fatalf("setup .gitignore: %v", err)
+	}
+	gitInitCommitted(t, manifest.Filename, ".gitignore")
+
+	if _, err := captureStdout(t, func() error { return cmdBump([]string{"patch", "--git"}) }); err != nil {
+		t.Fatalf("cmdBump --git with an ignored lock: %v", err)
+	}
+	if out := gitRun(t, "tag"); !strings.Contains(out, "v1.2.4") {
+		t.Errorf("tag v1.2.4 not created; tags = %q", out)
+	}
+	if out := gitRun(t, "status", "--porcelain"); strings.TrimSpace(out) != "" {
+		t.Errorf("working tree not clean after bump --git:\n%s", out)
+	}
+	// The lock is still updated on disk — it is just not in the commit.
+	lf, err := lockfile.Load(dir)
+	if err != nil {
+		t.Fatalf("reload lock: %v", err)
+	}
+	if lf.RootManifest.Version != "1.2.4" {
+		t.Errorf("lock root.version = %q, want %q", lf.RootManifest.Version, "1.2.4")
+	}
+	if committed := gitRun(t, "show", "--name-only", "--format=", "HEAD"); strings.Contains(committed, lockfile.Filename) {
+		t.Errorf("an ignored lock was forced into the commit:\n%s", committed)
+	}
+}
+
+// TestBumpUnreadableLockChangesNothing: a lock that cannot be parsed fails the
+// bump as a pre-flight, before the manifest is touched. Rewriting the manifest
+// first and only then discovering the broken lock left the command half-done —
+// version bumped, error returned, and under --git no commit or tag.
+func TestBumpUnreadableLockChangesNothing(t *testing.T) {
+	dir := writeBumpFixture(t, "{ not json at all")
+
+	out, err := captureStdout(t, func() error { return cmdBump([]string{"patch"}) })
+	if err == nil {
+		t.Fatal("cmdBump succeeded with an unparseable lockfile; want an error")
+	}
+	if strings.Contains(out, "→") {
+		t.Errorf("bump reported a version change before failing: %q", out)
+	}
+	m, mErr := manifest.Load(dir)
+	if mErr != nil {
+		t.Fatalf("reload manifest: %v", mErr)
+	}
+	if m.Version != "1.2.3" {
+		t.Errorf("manifest was rewritten despite the error: version = %q, want %q", m.Version, "1.2.3")
+	}
+}
+
+// TestBumpLeavesUnknownSchemaLockUntouched: a lock written by a newer fglpkg is
+// left exactly as found. Load keeps only the fields this build has tags for, so
+// rewriting one would silently strip whatever that version added — worse than a
+// stale root version, which the next install re-resolves anyway.
+func TestBumpLeavesUnknownSchemaLockUntouched(t *testing.T) {
+	future := `{
+  "lockfileVersion": 99,
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "generoVersion": "6.00.01",
+  "root": {
+    "name": "lock-sync",
+    "version": "1.2.3",
+    "declared": { "dependencies": {}, "devDependencies": {}, "optionalDependencies": {} }
+  },
+  "packages": [],
+  "jars": [],
+  "fieldFromTheFuture": { "keep": "me" }
+}
+`
+	dir := writeBumpFixture(t, future)
+	if _, err := captureStdout(t, func() error { return cmdBump([]string{"patch"}) }); err != nil {
+		t.Fatalf("cmdBump: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, lockfile.Filename))
+	if err != nil {
+		t.Fatalf("reread lock: %v", err)
+	}
+	if string(got) != future {
+		t.Errorf("an unrecognised-schema lock was rewritten:\n--- got ---\n%s", got)
+	}
+	// The manifest bump itself still goes through.
+	m, err := manifest.Load(dir)
+	if err != nil {
+		t.Fatalf("reload manifest: %v", err)
+	}
+	if m.Version != "1.2.4" {
+		t.Errorf("manifest version = %q, want %q", m.Version, "1.2.4")
 	}
 }
 

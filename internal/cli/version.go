@@ -90,6 +90,16 @@ func cmdBump(args []string) error {
 		}
 	}
 
+	// Read the lock before anything is written. `bump` keeps the lock's
+	// recorded root version in step with the manifest — the way npm's
+	// `npm version` also updates package-lock.json — so a lock it cannot use
+	// has to fail the command while the tree is still untouched, rather than
+	// leave a bumped fglpkg.json stranded behind an error (GIS-492).
+	lf, err := lockForBump(".")
+	if err != nil {
+		return err
+	}
+
 	oldStr := m.Version
 	m.Version = next.String()
 	if err := m.Save("."); err != nil {
@@ -97,18 +107,17 @@ func cmdBump(args []string) error {
 	}
 	fmt.Printf("%s → %s (in %s)\n", oldStr, m.Version, manifest.Filename)
 
-	// Keep the lockfile's recorded root version in step with the manifest — the
-	// way npm's `npm version` also updates package-lock.json. Only when a lock
-	// already exists: `bump` never resolves, so it must not create one. Bumping
-	// the version changes no constraint, so the resolved graph and the
-	// root.declared snapshot stay byte-for-byte identical; this is a field-only
-	// edit, not a re-resolution (GIS-492).
-	lockUpdated, err := syncLockVersion(".", next.String())
-	if err != nil {
-		return err
-	}
-	if lockUpdated {
-		fmt.Printf("Updated %s (root version → %s)\n", lockfile.Filename, next.String())
+	// Only root.version changes: a version bump moves no dependency
+	// constraint, so the resolved entries and the root.declared snapshot stay
+	// byte-for-byte identical. This is a field-only edit, not a re-resolution.
+	lockUpdated := false
+	if lf != nil && lf.RootManifest.Version != m.Version {
+		lf.RootManifest.Version = m.Version
+		if err := lf.Save("."); err != nil {
+			return err
+		}
+		lockUpdated = true
+		fmt.Printf("Updated %s (root version → %s)\n", lockfile.Filename, m.Version)
 	}
 
 	if gitMode {
@@ -117,9 +126,17 @@ func cmdBump(args []string) error {
 			return err
 		}
 		// Stage the lock in the same commit so the tag points at a consistent
-		// tree; without this the bump commit would leave the lock modified.
+		// tree; without this the bump commit would leave the lock modified. A
+		// project that gitignores its lock is the exception: `git add` on an
+		// ignored path is a hard error, which would abort the bump after the
+		// manifest was already rewritten — and the now-dirty tree would then
+		// block the retry on requireCleanGitTree.
 		if lockUpdated {
-			if err := runGit("add", lockfile.Filename); err != nil {
+			if gitPathIgnored(lockfile.Filename) {
+				fmt.Fprintf(os.Stderr,
+					"  Note: %s is gitignored — updated on disk, but left out of the commit.\n",
+					lockfile.Filename)
+			} else if err := runGit("add", lockfile.Filename); err != nil {
 				return err
 			}
 		}
@@ -137,29 +154,51 @@ func cmdBump(args []string) error {
 	return nil
 }
 
-// syncLockVersion updates the root version recorded in dir's lockfile to match a
-// freshly bumped manifest, returning whether it wrote anything. It is a no-op
-// (false) when no lockfile exists — `fglpkg bump` never resolves, so it must not
-// create a lock — and when the lock already records the target version. Only
-// root.version changes: a version bump alters no dependency constraint, so the
-// resolved entries and the root.declared snapshot are left untouched and the diff
-// is a single line (GIS-492).
-func syncLockVersion(dir, version string) (bool, error) {
+// lockForBump returns dir's lockfile when `bump` may edit its recorded root
+// version, or nil when it must leave the lock alone. Called as a pre-flight,
+// before the manifest is rewritten, so an unusable lock aborts the bump with
+// nothing changed (GIS-492).
+//
+// nil, nil means "no lock to keep in step", for two reasons:
+//
+//   - No lock exists. `bump` never resolves, so it must not create one.
+//   - The lock's schema is one this build does not understand. Load keeps only
+//     the fields it has tags for, so rewriting a newer lock would silently drop
+//     whatever that version added — a worse outcome than a stale root version,
+//     which the next install re-resolves anyway.
+//
+// A lock that exists but cannot be read or parsed is an error, not a skip:
+// silently ignoring it would let `bump` report success while leaving the lock
+// (and so `fglpkg list`, `fglpkg sbom`, and `install --frozen`) stale.
+func lockForBump(dir string) (*lockfile.LockFile, error) {
 	if !lockfile.Exists(dir) {
-		return false, nil
+		return nil, nil
 	}
 	lf, err := lockfile.Load(dir)
 	if err != nil {
-		return false, fmt.Errorf("failed to load %s: %w", lockfile.Filename, err)
+		return nil, fmt.Errorf("%w\n  Fix or remove %s, then run 'fglpkg bump' again "+
+			"(nothing has been changed).", err, lockfile.Filename)
 	}
-	if lf.RootManifest.Version == version {
-		return false, nil
+	if !lf.SchemaSupported() {
+		fmt.Fprintf(os.Stderr,
+			"  Note: %s has schema version %d, which this fglpkg does not understand —\n"+
+				"        leaving its root version alone (rewriting it could drop fields).\n",
+			lockfile.Filename, lf.Version)
+		return nil, nil
 	}
-	lf.RootManifest.Version = version
-	if err := lf.Save(dir); err != nil {
-		return false, fmt.Errorf("failed to write %s: %w", lockfile.Filename, err)
-	}
-	return true, nil
+	return lf, nil
+}
+
+// gitPathIgnored reports whether a .gitignore rule covers path, which makes
+// `git add path` a hard error ("The following paths are ignored by one of your
+// .gitignore files", exit 1) instead of a no-op. git's rule that a tracked file
+// is never ignored is honoured by check-ignore's own index lookup, so a lock
+// that is both committed and listed in .gitignore correctly reports false and
+// still gets staged. Any other outcome (exit 128 outside a repo) also reports
+// false and lets `git add` speak for itself — unreachable in practice, since
+// --git has already required a clean tree by then.
+func gitPathIgnored(path string) bool {
+	return exec.Command("git", "check-ignore", "-q", "--", path).Run() == nil
 }
 
 // bumpVersion returns the next Version for a given bump kind.
