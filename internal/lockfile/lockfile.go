@@ -457,6 +457,17 @@ func Load(dir string) (*LockFile, error) {
 	return &lf, nil
 }
 
+// SchemaSupported reports whether this lock's schema version is the one this
+// build understands. It exists for callers that edit a loaded lock in place
+// rather than regenerating it from a fresh resolve: Load silently discards any
+// field this build has no struct tag for, so round-tripping a lock written by a
+// newer fglpkg would strip whatever that version added. Validate rejects an
+// unknown schema outright; an in-place editor can instead leave the file alone
+// (GIS-492).
+func (lf *LockFile) SchemaSupported() bool {
+	return lf.Version == lockVersion
+}
+
 // Exists reports whether a lock file exists in dir.
 func Exists(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, Filename))

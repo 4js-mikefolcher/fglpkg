@@ -620,7 +620,7 @@ fglpkg.json — to change the package version, use 'fglpkg bump'.
 	},
 	{
 		Name:       "bump",
-		Summary:    "Bump the package version in fglpkg.json",
+		Summary:    "Bump the package version in fglpkg.json (and the lockfile)",
 		ListDetail: "\n(bump = patch|minor|major|prerelease|<semver>, add --git to tag)",
 		Args:       "<bump>",
 		Usage:      "fglpkg bump <patch|minor|major|prerelease|semver> [--git]",
@@ -629,8 +629,15 @@ fglpkg.json — to change the package version, use 'fglpkg bump'.
 
 Updates the "version" field of fglpkg.json. Accepts a bump kind
 (patch|minor|major|prerelease) or an explicit semver to set directly.
-With --git, requires a clean working tree, then stages fglpkg.json,
-commits, and creates a v<version> tag.
+
+When a fglpkg-lock.json is present, its recorded root version is updated
+to match — a field-only edit, no re-resolution — so 'fglpkg list' and
+'fglpkg sbom' stay in step without a re-install. A lock whose schema
+this fglpkg does not understand is left untouched.
+
+With --git, requires a clean working tree, then stages fglpkg.json (and
+the lockfile, unless it is gitignored), commits, and creates a
+v<version> tag.
 `,
 	},
 	{
