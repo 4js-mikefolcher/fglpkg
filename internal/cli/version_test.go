@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
@@ -90,6 +91,90 @@ func TestBumpCommandRoundTrip(t *testing.T) {
 	}
 	if reloaded.Version != "1.1.0" {
 		t.Errorf("reloaded version = %q, want %q", reloaded.Version, "1.1.0")
+	}
+}
+
+// TestBumpUpdatesLockfileRootVersion: when a lockfile sits beside the manifest,
+// `fglpkg bump` updates its root.version to match — the way npm's `npm version`
+// also rewrites package-lock.json (GIS-492). Only root.version changes; the
+// root.declared snapshot (and the resolved entries) must survive, because a
+// version bump is not a re-resolution.
+func TestBumpUpdatesLockfileRootVersion(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{
+  "name": "lock-sync",
+  "version": "1.2.3",
+  "dependencies": { "fgl": {} }
+}`
+	if err := os.WriteFile(filepath.Join(dir, manifest.Filename), []byte(raw), 0644); err != nil {
+		t.Fatalf("setup manifest: %v", err)
+	}
+	lock := `{
+  "lockfileVersion": 1,
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "generoVersion": "6.00.01",
+  "root": {
+    "name": "lock-sync",
+    "version": "1.2.3",
+    "declared": { "dependencies": {}, "devDependencies": {}, "optionalDependencies": {} }
+  },
+  "packages": [],
+  "jars": []
+}`
+	if err := os.WriteFile(filepath.Join(dir, lockfile.Filename), []byte(lock), 0644); err != nil {
+		t.Fatalf("setup lock: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	if _, err := captureStdout(t, func() error { return cmdBump([]string{"patch"}) }); err != nil {
+		t.Fatalf("cmdBump: %v", err)
+	}
+
+	lf, err := lockfile.Load(dir)
+	if err != nil {
+		t.Fatalf("reload lock: %v", err)
+	}
+	if lf.RootManifest.Version != "1.2.4" {
+		t.Errorf("lock root.version = %q, want %q", lf.RootManifest.Version, "1.2.4")
+	}
+	if lf.RootManifest.Declared == nil {
+		t.Error("lock root.declared was dropped; bump must not re-resolve")
+	}
+	m, err := manifest.Load(dir)
+	if err != nil {
+		t.Fatalf("reload manifest: %v", err)
+	}
+	if m.Version != "1.2.4" {
+		t.Errorf("manifest version = %q, want %q", m.Version, "1.2.4")
+	}
+}
+
+// TestBumpWithoutLockfileCreatesNone: `fglpkg bump` in a project that has no
+// lockfile must not fabricate one — bump never resolves (GIS-492).
+func TestBumpWithoutLockfileCreatesNone(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{
+  "name": "no-lock",
+  "version": "1.0.0",
+  "dependencies": { "fgl": {} }
+}`
+	if err := os.WriteFile(filepath.Join(dir, manifest.Filename), []byte(raw), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	if _, err := captureStdout(t, func() error { return cmdBump([]string{"minor"}) }); err != nil {
+		t.Fatalf("cmdBump: %v", err)
+	}
+	if lockfile.Exists(dir) {
+		t.Error("bump created a lockfile where none existed; it must not resolve")
 	}
 }
 

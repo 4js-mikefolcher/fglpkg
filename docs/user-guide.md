@@ -1003,7 +1003,7 @@ fglpkg bump patch    # or minor | major | prerelease | <semver>
 fglpkg publish
 ```
 
-`fglpkg bump` bumps the `version` field in `fglpkg.json` (`patch` takes `1.2.3` → `1.2.4`, etc.) and prints a suggested `git tag` command; pass `--git` to have it create the tag for you automatically. (`fglpkg version` is separate — it only prints the fglpkg tool version.) Publishing then works exactly like a first release — the CLI picks up the new version from the manifest. This is the same two-command flow regardless of package kind (BDL, JAR-bearing, or pure webcomponent).
+`fglpkg bump` bumps the `version` field in `fglpkg.json` (`patch` takes `1.2.3` → `1.2.4`, etc.) and prints a suggested `git tag` command; pass `--git` to have it create the tag for you automatically. If a `fglpkg-lock.json` is present, `bump` also updates its recorded root version to match (and stages it in the same commit under `--git`), so `fglpkg list` and `fglpkg sbom` stay in step without a re-install. (`fglpkg version` is separate — it only prints the fglpkg tool version.) Publishing then works exactly like a first release — the CLI picks up the new version from the manifest. This is the same two-command flow regardless of package kind (BDL, JAR-bearing, or pure webcomponent).
 
 **Consumers do not pick up the new version automatically.** Once a project has a `fglpkg-lock.json`, plain `fglpkg install` is a no-op if `fglpkg.json` hasn't changed — it validates the lock against what's on disk and prints `Lock file is up to date... Nothing to install`, even when a newer version satisfying the existing constraint (e.g. `^1.0.0`) now exists on the registry. To fetch it, run:
 

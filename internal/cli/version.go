@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
@@ -96,10 +97,31 @@ func cmdBump(args []string) error {
 	}
 	fmt.Printf("%s → %s (in %s)\n", oldStr, m.Version, manifest.Filename)
 
+	// Keep the lockfile's recorded root version in step with the manifest — the
+	// way npm's `npm version` also updates package-lock.json. Only when a lock
+	// already exists: `bump` never resolves, so it must not create one. Bumping
+	// the version changes no constraint, so the resolved graph and the
+	// root.declared snapshot stay byte-for-byte identical; this is a field-only
+	// edit, not a re-resolution (GIS-492).
+	lockUpdated, err := syncLockVersion(".", next.String())
+	if err != nil {
+		return err
+	}
+	if lockUpdated {
+		fmt.Printf("Updated %s (root version → %s)\n", lockfile.Filename, next.String())
+	}
+
 	if gitMode {
 		tag := "v" + m.Version
 		if err := runGit("add", manifest.Filename); err != nil {
 			return err
+		}
+		// Stage the lock in the same commit so the tag points at a consistent
+		// tree; without this the bump commit would leave the lock modified.
+		if lockUpdated {
+			if err := runGit("add", lockfile.Filename); err != nil {
+				return err
+			}
 		}
 		if err := runGit("commit", "-m", tag); err != nil {
 			return err
@@ -113,6 +135,31 @@ func cmdBump(args []string) error {
 		fmt.Printf("To tag this release: git tag v%s\n", m.Version)
 	}
 	return nil
+}
+
+// syncLockVersion updates the root version recorded in dir's lockfile to match a
+// freshly bumped manifest, returning whether it wrote anything. It is a no-op
+// (false) when no lockfile exists — `fglpkg bump` never resolves, so it must not
+// create a lock — and when the lock already records the target version. Only
+// root.version changes: a version bump alters no dependency constraint, so the
+// resolved entries and the root.declared snapshot are left untouched and the diff
+// is a single line (GIS-492).
+func syncLockVersion(dir, version string) (bool, error) {
+	if !lockfile.Exists(dir) {
+		return false, nil
+	}
+	lf, err := lockfile.Load(dir)
+	if err != nil {
+		return false, fmt.Errorf("failed to load %s: %w", lockfile.Filename, err)
+	}
+	if lf.RootManifest.Version == version {
+		return false, nil
+	}
+	lf.RootManifest.Version = version
+	if err := lf.Save(dir); err != nil {
+		return false, fmt.Errorf("failed to write %s: %w", lockfile.Filename, err)
+	}
+	return true, nil
 }
 
 // bumpVersion returns the next Version for a given bump kind.

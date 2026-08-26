@@ -477,7 +477,7 @@ fglpkg docs <package>                    # List documentation files
 fglpkg docs <package> <file>             # Display a documentation file
 
 # Releasing a package version
-fglpkg bump patch                        # Bump fglpkg.json version (patch|minor|major|prerelease|<semver>)
+fglpkg bump patch                        # Bump version in fglpkg.json (+ lockfile root) (patch|minor|major|prerelease|<semver>)
 fglpkg bump minor --git                  # Bump, then commit and tag v<version> (clean tree required)
 
 # Misc
